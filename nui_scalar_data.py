@@ -1,4 +1,5 @@
 import importlib
+import numpy as np
 import os
 import sys
 import threading
@@ -29,6 +30,7 @@ sys.path.append("/opt/dsl/lib/python3.11/site-packages")
 sys.path.append("/usr/local/lib/python3.11/site-packages")
 
 import lcm
+from comms import statexy_t
 from ini import dive_t  # for origin_latitude, origin_longitude
 
 
@@ -100,6 +102,16 @@ class NuiScalarDataDockWidget(QDockWidget):
         self.subscribers = {}
         self.subscribers["DIVE_INI"] = self.lc.subscribe(
             "DIVE_INI", self.handle_dive_ini
+        )
+        self.data_locks = {}
+        self.data_locks["STATEXY"] = threading.Lock()
+        self.data = {}
+        self.data["STATEXY"] = None
+        self.subscribers["FIBER_STATEXY"] = self.lc.subscribe(
+            "FIBER_STATEXY", self.handle_statexy
+        )
+        self.subscribers["ACOMM_STATEXY"] = self.lc.subscribe(
+            "ACOMM_STATEXY", self.handle_statexy
         )
 
         # I don't think initialize_origin is a slot ... how to register?
@@ -175,6 +187,38 @@ class NuiScalarDataDockWidget(QDockWidget):
         # Ah! This probably can't be a function call, unless we move everything
         # into the widget.
         self.add_field(channel_name, msg_type, msg_field, layer_name)
+
+    def handle_statexy(self, channel, data):
+        """ "
+        This is used for both Fiber and Acomms StateXY messages; only append
+        data to our vector if it's more recent.
+
+        QUESTION: Should we convert northing/easting to lat/lon immediately?
+            (I don't think it matters terribly -- it's always best-estimate, and I
+            don't think we'd ever want to correct for offsets.)
+        """
+        msg = statexy_t.decode(data)
+
+        with self.data_locks["STATEXY"]:
+            if self.data["STATEXY"] is None:
+                self.data["STATEXY"] = np.array([[msg.utime / 1.0e6, msg.x, msg.y]])
+            else:
+                new_t = msg.utime / 1.0e6
+                last_t = self.data["STATEXY"][-1][0]
+                if new_t > last_t:
+                    self.data["STATEXY"] = np.append(
+                        self.data["STATEXY"],
+                        [[msg.utime / 1.0e6, msg.x, msg.y]],
+                        axis=0,
+                    )
+                    print(f"Added statexy at t = {msg.utime/1.e6}")
+                else:
+                    QgsMessageLog.logMessage(f"Received stale msg: {channel}")
+
+        # We may want to do this less often...
+        # Maybe I want to set up a timer and say "ready for replot"?
+        # Though really, this one is just caching the data
+        # self.plot_nui_track()
 
     def handle_dive_ini(self, channel, data):
         print("handle_dive_ini")
