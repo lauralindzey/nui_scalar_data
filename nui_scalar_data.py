@@ -1,19 +1,25 @@
+import importlib
 import os
 import sys
 import threading
 
 import PyQt5.QtWidgets as QtWidgets
-from PyQt5.QtWidgets import QAction, QDockWidget, QVBoxLayout
+from PyQt5.QtWidgets import QAction, QDockWidget
 from PyQt5.QtGui import QIcon
 import PyQt5.QtCore as QtCore
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, QObject
 
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsMessageLog,
     QgsProject,
     QgsVectorDataProvider,
     QgsVectorLayer,
+)
+
+from qgis.gui import (
+    QgsMessageBar,
 )
 
 # For running on OSX. In Ubuntu, use python3.8
@@ -32,26 +38,110 @@ cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
 
 
 class NuiScalarDataDockWidget(QDockWidget):
-    def __init__(self, parent=None):
+    def __init__(self, iface, parent=None):
         super(NuiScalarDataDockWidget, self).__init__(parent)
+        self.iface = iface
 
-        self.vbox = QVBoxLayout()
+        self.grid = QtWidgets.QGridLayout()
+
         # self.add_field(channel, msg_type, msg_field, layer_name)
-        self.add_button = QtWidgets.QPushButton("Add Field")
-        self.add_button.clicked.connect(self.add_button_clicked)
+        self.channel_name_label = QtWidgets.QLabel("Channel:")
+        self.channel_name_lineedit = QtWidgets.QLineEdit()
+        self.grid.addWidget(self.channel_name_label, 0, 0)
+        self.grid.addWidget(self.channel_name_lineedit, 0, 1)
 
-        self.vbox.addWidget(self.add_button)
+        self.msg_type_label = QtWidgets.QLabel("LCM type:")
+        self.msg_type_lineedit = QtWidgets.QLineEdit()
+        self.grid.addWidget(self.msg_type_label, 1, 0)
+        self.grid.addWidget(self.msg_type_lineedit, 1, 1)
+
+        self.msg_field_label = QtWidgets.QLabel("Field:")
+        self.msg_field_lineedit = QtWidgets.QLineEdit()
+        self.grid.addWidget(self.msg_field_label, 2, 0)
+        self.grid.addWidget(self.msg_field_lineedit, 2, 1)
+
+        self.layer_name_label = QtWidgets.QLabel("Layer name:")
+        self.layer_name_lineedit = QtWidgets.QLineEdit()
+        self.grid.addWidget(self.layer_name_label, 3, 0)
+        self.grid.addWidget(self.layer_name_lineedit, 3, 1)
+
+        self.add_field_button = QtWidgets.QPushButton("Add Field")
+        self.add_field_button.clicked.connect(self.add_button_clicked)
+        self.grid.addWidget(self.add_field_button, 4, 0, 1, 2)
+
+        # TODO: set of QRadioButtons (or checkboxes?) for displaying individual
+        #   chunks of data on the plot
+        # TODO: Add actual matplotlib plot
 
         self.my_widget = QtWidgets.QWidget()
-        self.my_widget.setLayout(self.vbox)
+        self.my_widget.setLayout(self.grid)
 
         self.setWidget(self.my_widget)
         self.setWindowTitle("NUI Scalar Data")
 
+        # TODO: I think there's a cleaner way to dynamically import LCM types,
+        #   but this works for now.
+        self.msg_modules = {}
+
     def add_button_clicked(self, _checked):
-        # TODO: query other fields, then call
-        # self.add_field(channel, msg_type, msg_field, layer_name)
         print("add_button_clicked")
+
+        channel_name = self.channel_name_lineedit.text()
+        if channel_name.strip() == "":
+            errmsg = "Please select non-empty channel name."
+            print(errmsg)
+            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
+            QgsMessageLog.logMessage(errmsg)
+            return
+        print(f"channel_name: {channel_name}")
+
+        msg_type_str = self.msg_type_lineedit.text()
+        msg_type = None
+        msg = None
+        try:
+            msg_pkg, msg_class = msg_type_str.split(".")
+            self.msg_modules[msg_pkg] = importlib.import_module(msg_pkg)
+            msg_type = getattr(self.msg_modules[msg_pkg], msg_class)
+            msg = msg_type()
+            if not hasattr(msg, "utime"):
+                errmsg = "Plotted messages must have utime field!"
+                print(errmsg)
+                self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
+                QgsMessageLog.logMessage(errmsg)
+                return
+        except Exception as ex:
+            errmsg = f"Tried to instantiate a '{msg_type_str}'. Got exception {ex}"
+            print(errmsg)
+            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
+            QgsMessageLog.logMessage(errmsg)
+            return
+        print(f"msg_type = {msg_type_str}")
+
+        # QUESTION: Do we need to support nested fields?
+        msg_field = self.msg_field_lineedit.text()
+        if not hasattr(msg, msg_field):
+            errmsg = (
+                f"Message of type '{msg_type_str}' does not have field '{msg_field}'"
+            )
+            print(errmsg)
+            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
+            QgsMessageLog.logMessage(errmsg)
+            return
+        print(f"msg_field = {msg_field}")
+
+        layer_name = self.layer_name_lineedit.text()
+        if layer_name.strip() == "":
+            errmsg = "Please select non-empty layer name."
+            print(errmsg)
+            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
+            QgsMessageLog.logMessage(errmsg)
+            return
+        print(f"layer_name: {layer_name}")
+
+        # TODO: Call function adding layer. Will need to check whether our projection has been initialized.
+        # Ah! This probably can't be a function call, unless we move everything
+        # into the widget.
+        # self.add_field(channel_name, msg_type, msg_field, layer_name)
 
 
 # Trying to inherit from QObject for now so I can set up signals/slots
@@ -142,11 +232,6 @@ class NuiScalarDataPlugin(QObject):
         self.nui_group.addLayer(self.cursor_layer)
         print("...Added cursor_layer to map")
 
-        # TODO: Any other default ones?
-        channel = "NUI_SBE49_DATA"
-        msg_field = "sbe49.sbe49_t.temperature"
-        layer_name = "temperature"
-        # self.add_field(channel, msg_type, msg_field, layer_name)
         print("done with setup_layers")
 
     def initGui(self):
@@ -215,11 +300,9 @@ class NuiScalarDataPlugin(QObject):
         lcm_thread = threading.Thread(target=self.spin_lcm)
         lcm_thread.start()
 
-        self.dockwidget = NuiScalarDataDockWidget()
+        self.dockwidget = NuiScalarDataDockWidget(self.iface)
         self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.dockwidget)
         self.dockwidget.show()
         print("Done with dockwidget")
 
         # This function MUST return, or QGIS will block
-
-        # TODO: Add dockwidget!
