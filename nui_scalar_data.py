@@ -250,6 +250,7 @@ class NuiScalarDataDockWidget(QDockWidget):
         With longer delays, might wind up wanting to hold on to scalar data and only
         plot it after we have updated positions...but for now, adding it to layers as it comes in.
         """
+        # Do the interpolation in NuiXY coords, then transform into lat/lon before adding the feature to the layer.
         with self.data_locks["STATEXY"]:
             xx = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 1])
             yy = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 2])
@@ -277,8 +278,16 @@ class NuiScalarDataDockWidget(QDockWidget):
         I considered adding a flag to see if we need to redraw, but haven't yet.
         (This will also become more important when we start drawing time series plots.)
         """
-        print(f"{time.time()}: Calling refresh on the canvas!")
-        self.iface.mapCanvas().refresh()
+        # print(f"{time.time()}: Calling refresh on the canvas!")
+        # TODO: This doesn't actually seem to refresh the layers -- maybe I needed the caching method?
+        # The other problem is updating the bounds of the shading, ratehr than just not plotting points that are off the edges.
+        if self.iface.mapCanvas().isCachingEnabled():
+            # TODO: Should we check per-layer if it needs to be redrawn?
+            #    Maybe only redraw visible layers?
+            for key, layer in self.layers.items():
+                layer.triggerRepaint()
+        else:
+            self.iface.mapCanvas().refresh()
 
     @pyqtSlot(float, float)
     def initialize_origin(self, lon0, lat0):
@@ -292,6 +301,8 @@ class NuiScalarDataDockWidget(QDockWidget):
         print(f"Created CRS! isValid = {self.crs.isValid()}")
         self.crs_name = "NuiXY"
         self.crs.saveAsUserCrs(self.crs_name)
+        # For some reason, setting this custom CRS on a layer doesn't work, but it's fine
+        # for projecting points between.
         self.map_crs = QgsCoordinateReferenceSystem("epsg:4236")
         self.tr = QgsCoordinateTransform(self.crs, self.map_crs, QgsProject.instance())
         self.projection_initialized = True
@@ -343,6 +354,7 @@ class NuiScalarDataDockWidget(QDockWidget):
             print(errmsg)
             self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
             QgsMessageLog.logMessage(errmsg)
+            return
 
         self.layers[key] = QgsVectorLayer(
             f"Point?crs=epsg:4236&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
