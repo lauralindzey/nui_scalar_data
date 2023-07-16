@@ -1,0 +1,10 @@
+[general]
+name=NUI Scalar Data
+qgisMinimumVersion=3.0
+description=This plugin displays scalar data in map and profile view
+about=
+version=1.0
+author=Laura Lindzey
+email=lindzey@uw.edu
+repository=
+icon=nui.png
