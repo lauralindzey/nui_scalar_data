@@ -1,8 +1,10 @@
+import datetime
 import importlib
 import numpy as np
 import os
 import sys
 import threading
+import time
 
 import PyQt5.QtWidgets as QtWidgets
 from PyQt5.QtWidgets import QAction, QDockWidget
@@ -10,6 +12,7 @@ from PyQt5.QtGui import QIcon
 import PyQt5.QtCore as QtCore
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, QObject
 
+import qgis.core
 from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
@@ -40,7 +43,12 @@ cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
 
 
 class NuiScalarDataDockWidget(QDockWidget):
-    received_origin = pyqtSignal(float, float)
+    # If I understand correctly, any slots decorated with @pyqtSlot will be
+    # called in the thread that created the connection, NOT the thread that
+    # emitted the signal. So, use that to get data from the LCM thread into
+    # the main Widget thread.
+    received_origin = pyqtSignal(float, float)  # lon, lat in degrees
+    new_data = pyqtSignal(str, float, float)  # layer key, timestamp, value
 
     def __init__(self, iface, parent=None):
         super(NuiScalarDataDockWidget, self).__init__(parent)
@@ -114,8 +122,14 @@ class NuiScalarDataDockWidget(QDockWidget):
             "ACOMM_STATEXY", self.handle_statexy
         )
 
-        # I don't think initialize_origin is a slot ... how to register?
         self.received_origin.connect(self.initialize_origin)
+        self.new_data.connect(self.update_data)
+
+        self.update_timer = QtCore.QTimer()
+        self.update_timer.timeout.connect(self.maybe_refresh)
+        self.update_timer.setSingleShot(False)
+        # QUESTION: Why doesn't this fire at a constant rate?!??
+        self.update_timer.start(500)  # ms
 
         # TODO: consider shutting down plugin when the dockwidget is closed. Right now,
         #  the LCM callbacks just keep on being called.
@@ -211,14 +225,8 @@ class NuiScalarDataDockWidget(QDockWidget):
                         [[msg.utime / 1.0e6, msg.x, msg.y]],
                         axis=0,
                     )
-                    print(f"Added statexy at t = {msg.utime/1.e6}")
                 else:
                     QgsMessageLog.logMessage(f"Received stale msg: {channel}")
-
-        # We may want to do this less often...
-        # Maybe I want to set up a timer and say "ready for replot"?
-        # Though really, this one is just caching the data
-        # self.plot_nui_track()
 
     def handle_dive_ini(self, channel, data):
         print("handle_dive_ini")
@@ -230,17 +238,57 @@ class NuiScalarDataDockWidget(QDockWidget):
         self.lc.unsubscribe(self.subscribers[channel])
         self.received_origin.emit(msg.origin_longitude, msg.origin_latitude)
 
+    @pyqtSlot(str, float, float)
+    def update_data(self, key, tt, val):
+        """
+        I'm not sure if I'm going to have issues with interpolation + stateXY.
+        Will probably be more important as we start working acoustically; with statexy
+        on a fiber, I'd feel pretty good about just using the most recent position
+        if interpolation isn't an option.
+
+        With longer delays, might wind up wanting to hold on to scalar data and only
+        plot it after we have updated positions...but for now, adding it to layers as it comes in.
+        """
+        with self.data_locks["STATEXY"]:
+            xx = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 1])
+            yy = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 2])
+        feature = qgis.core.QgsFeature()
+        pt = qgis.core.QgsPointXY(xx, yy)
+        feature.setGeometry(qgis.core.QgsGeometry.fromPointXY(pt))
+        dt = datetime.datetime.utcfromtimestamp(tt)
+        feature.setAttributes(
+            [float(xx), float(yy), dt.strftime("%Y-%m-%d %H:%M:%S:%f"), val]
+        )
+        self.layers[key].dataProvider().addFeature(feature)
+
+    @pyqtSlot()
+    def maybe_refresh(self):
+        """
+        To avoid updating too frequently, we redraw at a fixed rate.
+
+        In my earlier experiments, I had refresh directly called by the LCM thread,
+        so needed a mutex on the layers.
+        In the Widget, I'm using signals/slots to guarantee that all layer-related
+        stuff happens in a single thread (I hope?)
+
+        I considered adding a flag to see if we need to redraw, but haven't yet.
+        (This will also become more important when we start drawing time series plots.)
+        """
+        print(f"{time.time()}: Calling refresh on the canvas!")
+        self.iface.mapCanvas().refresh()
+
     @pyqtSlot(float, float)
     def initialize_origin(self, lon0, lat0):
-        print("initialize_origin")
+        print(f"initialize_origin. lon={lon0}, lat={lat0}")
         self.lon0 = lon0
         self.lat0 = lat0
-        crs = QgsCoordinateReferenceSystem()
-        crs.createFromProj(
+        self.crs = QgsCoordinateReferenceSystem()
+        self.crs.createFromProj4(
             f"+proj=ortho +lat_0={self.lat0} +lon_0={self.lon0} +ellps=WGS84"
         )
+        print(f"Created CRS! isValid = {self.crs.isValid()}")
         self.crs_name = "NuiXY"
-        crs.saveAsUserCrs(self.crs_name)
+        self.crs.saveAsUserCrs(self.crs_name)
         self.projection_initialized = True
 
         self.setup_layers()
@@ -257,6 +305,7 @@ class NuiScalarDataDockWidget(QDockWidget):
         if self.nui_group is None:
             self.nui_group = self.root.insertGroup(0, "NUI")
 
+        # TODO: Why isn't this finding the layer?!??
         try:
             self.cursor_layer = self.nui_group.findLayer("Scalar Data Cursor")
         except Exception as ex:
@@ -291,7 +340,7 @@ class NuiScalarDataDockWidget(QDockWidget):
             QgsMessageLog.logMessage(errmsg)
 
         self.layers[key] = QgsVectorLayer(
-            f"Point?crs={self.crs_name}&field=value:double&index=yes",
+            f"Point?crs={self.crs_name}&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
             layer_name,
             "memory",
         )
@@ -309,22 +358,20 @@ class NuiScalarDataDockWidget(QDockWidget):
         )
 
     def handle_data(self, msg_type, msg_field, channel, data):
+        key = f"{channel}/{msg_field}"
         try:
             msg = msg_type.decode(data)
-        except Exception as ex:
+            tt = msg.utime / 1.0e6
+            vv = getattr(msg, msg_field)
+            self.new_data.emit(key, tt, vv)
+        except ValueError as ex:
             errmsg = f"Could not decode message of type {msg_type} from channel {channel}. Exception = {ex}"
             print(errmsg)
             QgsMessageLog.logMessage(errmsg)
-        try:
-            tt = msg.utime / 1.0e6
-            vv = getattr(msg, msg_field)
-        except Exception as ex:
+        except AttributeError as ex:
             errmsg = f"Couldn't parse data from message: {ex}"
             print(errmsg)
             QgsMessageLog.logMessage(errmsg)
-
-        print(f"{tt}: {vv}")
-        # TODO: Actually do something with the data! Add to history + plot.
 
     def spin_lcm(self):
         print("spin_lcm")
@@ -341,6 +388,7 @@ class NuiScalarDataDockWidget(QDockWidget):
     def closeEvent(self, event):
         print("handle_close_event")
         self.shutdown = True
+        self.update_timer.stop()
         for key, sub in self.subscribers.items():
             print(f"Unsubscribing from {key}")
             try:
