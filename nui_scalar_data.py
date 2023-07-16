@@ -16,6 +16,7 @@ import qgis.core
 from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
     QgsMessageLog,
     QgsProject,
     QgsVectorDataProvider,
@@ -254,7 +255,9 @@ class NuiScalarDataDockWidget(QDockWidget):
             yy = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 2])
         feature = qgis.core.QgsFeature()
         pt = qgis.core.QgsPointXY(xx, yy)
-        feature.setGeometry(qgis.core.QgsGeometry.fromPointXY(pt))
+        geom = qgis.core.QgsGeometry.fromPointXY(pt)
+        geom.transform(self.tr)
+        feature.setGeometry(geom)
         dt = datetime.datetime.utcfromtimestamp(tt)
         feature.setAttributes(
             [float(xx), float(yy), dt.strftime("%Y-%m-%d %H:%M:%S:%f"), val]
@@ -289,6 +292,8 @@ class NuiScalarDataDockWidget(QDockWidget):
         print(f"Created CRS! isValid = {self.crs.isValid()}")
         self.crs_name = "NuiXY"
         self.crs.saveAsUserCrs(self.crs_name)
+        self.map_crs = QgsCoordinateReferenceSystem("epsg:4236")
+        self.tr = QgsCoordinateTransform(self.crs, self.map_crs, QgsProject.instance())
         self.projection_initialized = True
 
         self.setup_layers()
@@ -315,7 +320,7 @@ class NuiScalarDataDockWidget(QDockWidget):
         # TODO: Probably also need to check whether it's the right type of layer...
         if self.cursor_layer is None:
             self.cursor_layer = QgsVectorLayer(
-                f"Point?crs={self.crs_name}&field=time:string(30)&index=yes",
+                f"Point?crs=epsg:4236&field=time:string(30)&index=yes",
                 "Scalar Data Cursor",
                 "memory",
             )
@@ -340,7 +345,7 @@ class NuiScalarDataDockWidget(QDockWidget):
             QgsMessageLog.logMessage(errmsg)
 
         self.layers[key] = QgsVectorLayer(
-            f"Point?crs={self.crs_name}&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
+            f"Point?crs=epsg:4236&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
             layer_name,
             "memory",
         )
