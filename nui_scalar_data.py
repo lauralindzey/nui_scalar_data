@@ -2,9 +2,10 @@ import os
 import sys
 import threading
 
-
-from PyQt5.QtWidgets import QAction
+import PyQt5.QtWidgets as QtWidgets
+from PyQt5.QtWidgets import QAction, QDockWidget, QVBoxLayout
 from PyQt5.QtGui import QIcon
+import PyQt5.QtCore as QtCore
 from PyQt5.QtCore import pyqtSignal, pyqtSlot, QObject
 
 from qgis.core import (
@@ -28,6 +29,29 @@ from ini import dive_t  # for origin_latitude, origin_longitude
 import inspect
 
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
+
+
+class NuiScalarDataDockWidget(QDockWidget):
+    def __init__(self, parent=None):
+        super(NuiScalarDataDockWidget, self).__init__(parent)
+
+        self.vbox = QVBoxLayout()
+        # self.add_field(channel, msg_type, msg_field, layer_name)
+        self.add_button = QtWidgets.QPushButton("Add Field")
+        self.add_button.clicked.connect(self.add_button_clicked)
+
+        self.vbox.addWidget(self.add_button)
+
+        self.my_widget = QtWidgets.QWidget()
+        self.my_widget.setLayout(self.vbox)
+
+        self.setWidget(self.my_widget)
+        self.setWindowTitle("NUI Scalar Data")
+
+    def add_button_clicked(self, _checked):
+        # TODO: query other fields, then call
+        # self.add_field(channel, msg_type, msg_field, layer_name)
+        print("add_button_clicked")
 
 
 # Trying to inherit from QObject for now so I can set up signals/slots
@@ -67,7 +91,7 @@ class NuiScalarDataPlugin(QObject):
         QgsMessageLog.logMessage("handle_dive_ini")
         msg = dive_t.decode(data)
         QgsMessageLog.logMessage(
-            f"Got map origin: {msg.origin_longitude}, {msg.origin_longitude}; unsubscribing from {channel}"
+            f"Got map origin: {msg.origin_longitude}, {msg.origin_latitude}; unsubscribing from {channel}"
         )
         self.lc.unsubscribe(self.subscribers[channel])
         self.received_origin.emit(msg.origin_longitude, msg.origin_latitude)
@@ -120,9 +144,9 @@ class NuiScalarDataPlugin(QObject):
 
         # TODO: Any other default ones?
         channel = "NUI_SBE49_DATA"
-        field = "sbe49.sbe49_t.temperature"
+        msg_field = "sbe49.sbe49_t.temperature"
         layer_name = "temperature"
-        # self.add_field(channel, field, layer_name)
+        # self.add_field(channel, msg_type, msg_field, layer_name)
         print("done with setup_layers")
 
     def initGui(self):
@@ -190,6 +214,11 @@ class NuiScalarDataPlugin(QObject):
 
         lcm_thread = threading.Thread(target=self.spin_lcm)
         lcm_thread.start()
+
+        self.dockwidget = NuiScalarDataDockWidget()
+        self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.dockwidget)
+        self.dockwidget.show()
+        print("Done with dockwidget")
 
         # This function MUST return, or QGIS will block
 
