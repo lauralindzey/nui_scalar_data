@@ -38,6 +38,8 @@ cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
 
 
 class NuiScalarDataDockWidget(QDockWidget):
+    received_origin = pyqtSignal(float, float)
+
     def __init__(self, iface, parent=None):
         super(NuiScalarDataDockWidget, self).__init__(parent)
         self.iface = iface
@@ -83,8 +85,39 @@ class NuiScalarDataDockWidget(QDockWidget):
         #   but this works for now.
         self.msg_modules = {}
 
+        ####
+        # Moving stuff from the original QObject
+        # layer_name -> QgsVectorLayer to add features to
+        self.layers = {}
+        # layer_name -> np.array where 1st column is time and 2nd is data
+        self.data = {}
+
+        # Everything NUI does is in the AlvinXY coordinate frame, with origin
+        # as defined in the DIVE_INI message. So, we can't set up layers until
+        # the first message has been received.
+        self.projection_initialized = False
+        self.lc = lcm.LCM("udpm://239.255.76.67:7667?ttl=0")
+        self.subscribers = {}
+        self.subscribers["DIVE_INI"] = self.lc.subscribe(
+            "DIVE_INI", self.handle_dive_ini
+        )
+
+        # I don't think initialize_origin is a slot ... how to register?
+        self.received_origin.connect(self.initialize_origin)
+
+        # TODO: consider shutting down plugin when the dockwidget is closed. Right now,
+        #  the LCM callbacks just keep on being called.
+        self.shutdown = False
+
     def add_button_clicked(self, _checked):
         print("add_button_clicked")
+
+        if not self.projection_initialized:
+            errmsg = "Waiting on DIVE_INI; cannot add layers."
+            print(errmsg)
+            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
+            QgsMessageLog.logMessage(errmsg)
+            return
 
         channel_name = self.channel_name_lineedit.text()
         if channel_name.strip() == "":
@@ -141,40 +174,7 @@ class NuiScalarDataDockWidget(QDockWidget):
         # TODO: Call function adding layer. Will need to check whether our projection has been initialized.
         # Ah! This probably can't be a function call, unless we move everything
         # into the widget.
-        # self.add_field(channel_name, msg_type, msg_field, layer_name)
-
-
-# Trying to inherit from QObject for now so I can set up signals/slots
-class NuiScalarDataPlugin(QObject):
-    received_origin = pyqtSignal(float, float)
-
-    def __init__(self, iface):
-        """
-        Re-use the appropriate layers if they exist, in order to let the user
-        save stylings in their QGIS project.
-        QUESTION(lindzey): Does subclassing the QgsPluginLayer help with this?
-        """
-        print("__init__")
-        super(NuiScalarDataPlugin, self).__init__()
-        self.iface = iface
-
-        # layer_name -> QgsVectorLayer to add features to
-        self.layers = {}
-        # layer_name -> np.array where 1st column is time and 2nd is data
-        self.data = {}
-
-        # Everything NUI does is in the AlvinXY coordinate frame, with origin
-        # as defined in the DIVE_INI message. So, we can't set up layers until
-        # the first message has been received.
-        self.projection_initialized = False
-        self.lc = lcm.LCM("udpm://239.255.76.67:7667?ttl=0")
-        self.subscribers = {}
-        self.subscribers["DIVE_INI"] = self.lc.subscribe(
-            "DIVE_INI", self.handle_dive_ini
-        )
-
-        # I don't think initialize_origin is a slot ... how to register?
-        self.received_origin.connect(self.initialize_origin)
+        self.add_field(channel_name, msg_type, msg_field, layer_name)
 
     def handle_dive_ini(self, channel, data):
         print("handle_dive_ini")
@@ -234,6 +234,92 @@ class NuiScalarDataPlugin(QObject):
 
         print("done with setup_layers")
 
+    def add_field(self, channel, msg_type, msg_field, layer_name):
+        """
+        Subscribe to specified data and plot in both map and profile view.
+        """
+        key = f"{channel}/{msg_field}"
+        print(f"add_field for key={key}")
+        if key in self.layers:
+            errmsg = f"Duplicate field '{key}'"
+            print(errmsg)
+            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
+            QgsMessageLog.logMessage(errmsg)
+
+        self.layers[key] = QgsVectorLayer(
+            f"Point?crs={self.crs_name}&field=value:double&index=yes",
+            layer_name,
+            "memory",
+        )
+        QgsProject.instance().addMapLayer(self.layers[key], False)
+        self.nui_group.addLayer(self.layers[key])
+        print(f"Added layer '{layer_name}' to map")
+
+        # QUESTION: Can we have multiple subscriptions to the same topic?
+        # (e.g. if I want temperature and salinity ...)
+        self.subscribers[key] = self.lc.subscribe(
+            channel,
+            lambda channel, data, msg_type=msg_type, msg_field=msg_field: self.handle_data(
+                msg_type, msg_field, channel, data
+            ),
+        )
+
+    def handle_data(self, msg_type, msg_field, channel, data):
+        try:
+            msg = msg_type.decode(data)
+        except Exception as ex:
+            errmsg = f"Could not decode message of type {msg_type} from channel {channel}. Exception = {ex}"
+            print(errmsg)
+            QgsMessageLog.logMessage(errmsg)
+        try:
+            tt = msg.utime / 1.0e6
+            vv = getattr(msg, msg_field)
+        except Exception as ex:
+            errmsg = f"Couldn't parse data from message: {ex}"
+            print(errmsg)
+            QgsMessageLog.logMessage(errmsg)
+
+        print(f"{tt}: {vv}")
+        # TODO: Actually do something with the data! Add to history + plot.
+
+    def spin_lcm(self):
+        print("spin_lcm")
+        QgsMessageLog.logMessage("spin_lcm")
+        while not self.shutdown:
+            self.lc.handle()
+        print("stopping spin_lcm")
+
+    def run(self):
+        lcm_thread = threading.Thread(target=self.spin_lcm)
+        lcm_thread.start()
+        # This function MUST return, or QGIS will block
+
+    def closeEvent(self, event):
+        print("handle_close_event")
+        self.shutdown = True
+        for key, sub in self.subscribers.items():
+            print(f"Unsubscribing from {key}")
+            try:
+                self.lc.unsubscribe(sub)
+            except Exception as ex:
+                # If we've already unsubscribed from DIVE_INI, this will fail.
+                print(ex)
+
+        event.accept()
+
+
+# Trying to inherit from QObject for now so I can set up signals/slots
+class NuiScalarDataPlugin(QObject):
+    def __init__(self, iface):
+        """
+        Re-use the appropriate layers if they exist, in order to let the user
+        save stylings in their QGIS project.
+        QUESTION(lindzey): Does subclassing the QgsPluginLayer help with this?
+        """
+        print("__init__")
+        super(NuiScalarDataPlugin, self).__init__()
+        self.iface = iface
+
     def initGui(self):
         """
         Required method; called when plugin loaded.
@@ -251,58 +337,18 @@ class NuiScalarDataPlugin(QObject):
         """
         Required method; called when plugin unloaded.
         """
+        print("unload")
         self.iface.removeToolBarIcon(self.action)
         self.iface.removePluginMenu("&NUI Scalar Data", self.action)
         del self.action
 
-    def add_field(self, channel, msg_type, msg_field, layer_name):
-        """
-        Subscribe to specified data and plot in both map and profile view.
-        """
-        key = f"{channel}/{msg_field}"
-        print(f"add_field for key={key}")
-        self.layers[key] = QgsVectorLayer(
-            f"Point?crs={self.crs_name}&field=value:double&index=yes",
-            layer_name,
-            "memory",
-        )
-        QgsProject.instance().addMapLayer(self.layer)
-
-        # QUESTION: Can we have multiple subscriptions to the same topic?
-        # (e.g. if I want temperature and salinity ...)
-        self.subscribers[key] = self.lc.subscribe(
-            channel,
-            lambda channel, data, msg_type=msg_type, msg_field=msg_field: self.handle_data(
-                msg_type, msg_field, channel, data
-            ),
-        )
-
-    def handle_data(self, msg_type_str, msg_field, channel, data):
-        pass
-
-    def spin_lcm(self):
-        print("spin_lcm")
-        QgsMessageLog.logMessage("spin_lcm")
-        count = 0
-        while True:
-            self.lc.handle()
-            count += 1
-            if count > 1000:
-                QgsMessageLog.logMessage("stopping spin_lcm")
-                print("stopping spin_lcm")
-                break
-
     def run(self):
         print("run")
-
-        self.iface.messageBar().pushMessage("Hello from Plugin")
-
-        lcm_thread = threading.Thread(target=self.spin_lcm)
-        lcm_thread.start()
 
         self.dockwidget = NuiScalarDataDockWidget(self.iface)
         self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.dockwidget)
         self.dockwidget.show()
+        self.dockwidget.run()
         print("Done with dockwidget")
 
         # This function MUST return, or QGIS will block
