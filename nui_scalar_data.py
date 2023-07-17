@@ -1,7 +1,8 @@
 import datetime
 import importlib
 from matplotlib.figure import Figure
-from matplotlib.ticker import FuncFormatter
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, ScalarFormatter
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import numpy as np
 import os
@@ -107,6 +108,9 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.data_axes = {}
         self.data_plots = {}
         self.plot_length = -1  # In seconds; if -1, plot all available data
+        # We need our own instance of a color cycler because I'm using multiple axes
+        # on top of each other, and by default, each axis gets its own cycler.
+        self.color_cycler = plt.rcParams["axes.prop_cycle"]()
 
         # Everything NUI does is in the AlvinXY coordinate frame, with origin
         # as defined in the DIVE_INI message. So, we can't set up layers until
@@ -413,17 +417,10 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             t0 = np.max(self.data[key][:, 0]) - self.plot_length
             (idxs,) = np.where(self.data[key][:, 0] > t0)
 
-        if self.data_plots[key] is None:
-            (self.data_plots[key],) = self.data_axes[key].plot(
-                self.data[key][idxs, 0], self.data[key][idxs, 1], ".", markersize=1
-            )
-        else:
-            self.data_plots[key].set_data(
-                self.data[key][idxs, 0], self.data[key][idxs, 1]
-            )
+        self.data_plots[key].set_data(self.data[key][idxs, 0], self.data[key][idxs, 1])
+
         # This didn't seem to work
         # self.data_axes[key].relim()
-
         xlim = [np.min(self.data[key][idxs, 0]), np.max(self.data[key][idxs, 0])]
         ylim = [np.min(self.data[key][idxs, 1]), np.max(self.data[key][idxs, 1])]
         self.data_axes[key].set_xlim(xlim)
@@ -449,7 +446,11 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             # TODO: Should we check per-layer if it needs to be redrawn?
             #    Maybe only redraw visible layers?
             for key, layer in self.layers.items():
-                layer.triggerRepaint()
+                # I'm not sure how this wound up getting called while layer was None.
+                # I thought all things touching the layer were in the same thread,
+                # and that layer creation would finish before this was called.
+                if layer is not None:
+                    layer.triggerRepaint()
         else:
             self.iface.mapCanvas().refresh()
 
@@ -541,9 +542,42 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.sample_rates[key] = sample_rate
         self.last_updated[key] = 0.0
         self.data_axes[key] = self.ax.twinx()
+        # Try to split labels across left/right for readability
+        if len(self.fig.axes) % 2 == 0:
+            self.data_axes[key].yaxis.set_label_position("left")
+            self.data_axes[key].tick_params(
+                axis="both",
+                left=True,
+                right=False,
+                top=False,
+                bottom=False,
+                labelleft=True,
+                labelright=False,
+                labeltop=False,
+                labelbottom=False,
+            )
+        else:
+            self.data_axes[key].yaxis.set_label_position("right")
+            self.data_axes[key].tick_params(
+                axis="both",
+                left=False,
+                right=True,
+                top=False,
+                bottom=False,
+                labelleft=False,
+                labelright=True,
+                labeltop=False,
+                labelbottom=False,
+            )
+        # Set colors for each axes
         self.data_axes[key].set_ylabel(layer_name)
-        self.data_plots[key] = None
-        # TODO: Turn off xlabels?
+        self.data_axes[key].yaxis.set_major_formatter(ScalarFormatter(useOffset=False))
+        color = next(self.color_cycler)["color"]
+        self.data_axes[key].yaxis.label.set_color(color)
+        self.data_axes[key].tick_params(axis="y", colors=color)
+        (self.data_plots[key],) = self.data_axes[key].plot(
+            [], [], ".", markersize=1, color=color, label=layer_name
+        )
 
         print("Searching scalar data group's children...")
         for ll in self.scalar_data_group.children():
@@ -576,6 +610,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
                 msg_type, msg_field, channel, data
             ),
         )
+
+        # Create the axis to plot onto
 
     def handle_data(self, msg_type, msg_field, channel, data):
         key = f"{channel}/{msg_field}"
