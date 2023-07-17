@@ -1,5 +1,8 @@
 import datetime
 import importlib
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import numpy as np
 import os
 import sys
@@ -44,7 +47,7 @@ import inspect
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
 
 
-class NuiScalarDataDockWidget(QDockWidget):
+class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
     # If I understand correctly, any slots decorated with @pyqtSlot will be
     # called in the thread that created the connection, NOT the thread that
     # emitted the signal. So, use that to get data from the LCM thread into
@@ -55,7 +58,7 @@ class NuiScalarDataDockWidget(QDockWidget):
     new_data = pyqtSignal(str, float, float)  # layer key, timestamp, value
 
     def __init__(self, iface, parent=None):
-        super(NuiScalarDataDockWidget, self).__init__(parent)
+        super(NuiScalarDataMainWindow, self).__init__(parent)
         self.iface = iface
 
         try:
@@ -121,51 +124,87 @@ class NuiScalarDataDockWidget(QDockWidget):
         self.shutdown = False
 
     def setup_ui(self):
-        self.grid = QtWidgets.QGridLayout()
+        self.subscription_grid = QtWidgets.QGridLayout()
 
         row = 0
         self.channel_name_label = QtWidgets.QLabel("Channel:")
         self.channel_name_lineedit = QtWidgets.QLineEdit()
-        self.grid.addWidget(self.channel_name_label, row, 0)
-        self.grid.addWidget(self.channel_name_lineedit, row, 1)
+        self.subscription_grid.addWidget(self.channel_name_label, row, 0)
+        self.subscription_grid.addWidget(self.channel_name_lineedit, row, 1)
         row += 1
 
         self.msg_type_label = QtWidgets.QLabel("LCM type:")
         self.msg_type_lineedit = QtWidgets.QLineEdit()
-        self.grid.addWidget(self.msg_type_label, row, 0)
-        self.grid.addWidget(self.msg_type_lineedit, row, 1)
+        self.subscription_grid.addWidget(self.msg_type_label, row, 0)
+        self.subscription_grid.addWidget(self.msg_type_lineedit, row, 1)
         row += 1
 
         self.msg_field_label = QtWidgets.QLabel("Field:")
         self.msg_field_lineedit = QtWidgets.QLineEdit()
-        self.grid.addWidget(self.msg_field_label, row, 0)
-        self.grid.addWidget(self.msg_field_lineedit, row, 1)
+        self.subscription_grid.addWidget(self.msg_field_label, row, 0)
+        self.subscription_grid.addWidget(self.msg_field_lineedit, row, 1)
         row += 1
 
         self.sample_rate_label = QtWidgets.QLabel("Rate (Hz):")
         self.sample_rate_lineedit = QtWidgets.QLineEdit()
-        self.grid.addWidget(self.sample_rate_label, row, 0)
-        self.grid.addWidget(self.sample_rate_lineedit, row, 1)
+        self.subscription_grid.addWidget(self.sample_rate_label, row, 0)
+        self.subscription_grid.addWidget(self.sample_rate_lineedit, row, 1)
         row += 1
 
         self.layer_name_label = QtWidgets.QLabel("Layer name:")
         self.layer_name_lineedit = QtWidgets.QLineEdit()
-        self.grid.addWidget(self.layer_name_label, row, 0)
-        self.grid.addWidget(self.layer_name_lineedit, row, 1)
+        self.subscription_grid.addWidget(self.layer_name_label, row, 0)
+        self.subscription_grid.addWidget(self.layer_name_lineedit, row, 1)
         row += 1
 
         self.add_field_button = QtWidgets.QPushButton("Add Field")
         self.add_field_button.clicked.connect(self.add_button_clicked)
-        self.grid.addWidget(self.add_field_button, row, 0, 1, 2)
+        self.subscription_grid.addWidget(self.add_field_button, row, 0, 1, 2)
+
+        self.fig = Figure((8.0, 4.0), dpi=100)
+        self.ax = self.fig.add_axes([0.1, 0.1, 0.8, 0.8])
+        self.canvas = FigureCanvas(self.fig)
+        # self.canvas.setFocusPolicy(QtCore.Qt.NoFocus)
+        # self.canvas.setParent(self.plot_widget)
+        # self.canvas.mpl_connect("motion_notify_event", self.on_motion_notify_event)
 
         # TODO: set of QRadioButtons (or checkboxes?) for displaying individual
         #   chunks of data on the plot
-        # TODO: Add actual matplotlib plot
-        self.my_widget = QtWidgets.QWidget()
-        self.my_widget.setLayout(self.grid)
 
-        self.setWidget(self.my_widget)
+        self.vbox = QtWidgets.QVBoxLayout()
+        self.vbox.addLayout(self.subscription_grid)
+        self.vbox.addStretch(1.0)
+
+        self.hbox = QtWidgets.QHBoxLayout()
+        self.hbox.addLayout(self.vbox)
+        self.hbox.addWidget(self.canvas, stretch=5)
+
+        self.my_widget = QtWidgets.QWidget()
+        self.my_widget.setLayout(self.hbox)
+
+        self.setCentralWidget(self.my_widget)
         self.setWindowTitle("NUI Scalar Data")
+
+    def on_motion_notify_event(self, event):
+        """
+        When the user drags the mouse across the plot, want to update the
+        cursor on the map as well.
+        """
+        if event.inaxes is not self.ax:
+            # QgsMessageLog.logMessage("got motion that's not in the figure axes")
+            return
+        else:
+            QgsMessageLog.logMessage(f"got motion! mouse at {event.x}, {event.y}")
+            data_xx, data_yy = self.ax.transData.inverted().transform(
+                (event.x, event.y)
+            )
+            QgsMessageLog.logMessage(f"Which is at data coords {data_xx}, {data_yy}.")
+
+        # TODO: Figure out the timestamp corresponding to the event
+        # TODO: Add checkbox controlling whether the cursor is active
+        # TODO: Add layer on map with cursor
+        # TODO: Add cursor
+        # TODO: Add second axis, with twinx?
 
     def add_button_clicked(self, _checked):
         print("add_button_clicked")
@@ -549,10 +588,18 @@ class NuiScalarDataPlugin(QObject):
     def run(self):
         print("run")
 
-        self.dockwidget = NuiScalarDataDockWidget(self.iface)
-        self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.dockwidget)
-        self.dockwidget.show()
-        self.dockwidget.run()
-        print("Done with dockwidget")
+        # I actually prefer this, because multiple windows are easier to deal
+        # with than a dockable window that won't go to the background.
+        # self.mainwindow = NuiScalarDataMainWindow(self.iface)
+        # self.mainwindow.show()
+        # self.mainwindow.run()
 
+        # However, it's possible to wrap the MainWindow in a DockWidget...
+        mw = NuiScalarDataMainWindow(self.iface)
+        self.dw = QtWidgets.QDockWidget("NUI Scalar Data")
+        self.dw.setWidget(mw)
+        self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.dw)
+        mw.run()
+
+        print("Done with dockwidget")
         # This function MUST return, or QGIS will block
