@@ -1,7 +1,7 @@
 import datetime
 import importlib
 from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import numpy as np
 import os
@@ -103,6 +103,10 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.sample_rates = {}
         # layer_name -> timestamp of most recently-added feature (used for decimation)
         self.last_updated = {}
+        # layer_name -> axes object for plotting
+        self.data_axes = {}
+        self.data_plots = {}
+        self.plot_length = -1  # In seconds; if -1, plot all available data
 
         # Everything NUI does is in the AlvinXY coordinate frame, with origin
         # as defined in the DIVE_INI message. So, we can't set up layers until
@@ -176,7 +180,27 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.subscription_grid.addWidget(self.add_field_button, row, 0, 1, 2)
 
         self.fig = Figure((8.0, 4.0), dpi=100)
-        self.ax = self.fig.add_axes([0.1, 0.1, 0.8, 0.8])
+        self.ax = self.fig.add_axes([0.1, 0.15, 0.8, 0.8])
+        # TODO: Turn off this one's y-labels/ticks?, because we won't use it, other than for twinning?
+        self.time_formatter = FuncFormatter(
+            lambda tt, pos: datetime.datetime.utcfromtimestamp(tt).strftime("%H:%M:%S")
+        )
+        self.ax.xaxis.set_major_formatter(self.time_formatter)
+        self.ax.xaxis.set_tick_params(which="both", labelrotation=60)
+        self.ax.tick_params(
+            axis="both",
+            left=False,
+            top=False,
+            right=False,
+            bottom=True,
+            labelleft=False,
+            labeltop=False,
+            labelright=False,
+            labelbottom=True,
+        )
+
+        self.ax.get_yaxis().set_visible(False)
+
         self.canvas = FigureCanvas(self.fig)
         # self.canvas.setFocusPolicy(QtCore.Qt.NoFocus)
         # self.canvas.setParent(self.plot_widget)
@@ -366,7 +390,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         if self.data[key] is None:
             self.data[key] = np.array([[tt, val]])
         else:
-            self.data[key] = np.append(self.data[key], np.array([[tt, val]]))
+            self.data[key] = np.append(self.data[key], np.array([[tt, val]]), axis=0)
 
         # Do the interpolation in NuiXY coords, then transform into lat/lon before adding the feature to the layer.
         with self.data_locks["STATEXY"]:
@@ -382,6 +406,28 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             [float(xx), float(yy), dt.strftime("%Y-%m-%d %H:%M:%S:%f"), val]
         )
         self.layers[key].dataProvider().addFeature(feature)
+
+        if self.plot_length < 0:
+            (idxs,) = np.where(self.data[key][:, 0] > 0)
+        else:
+            t0 = np.max(self.data[key][:, 0]) - self.plot_length
+            (idxs,) = np.where(self.data[key][:, 0] > t0)
+
+        if self.data_plots[key] is None:
+            (self.data_plots[key],) = self.data_axes[key].plot(
+                self.data[key][idxs, 0], self.data[key][idxs, 1], ".", markersize=1
+            )
+        else:
+            self.data_plots[key].set_data(
+                self.data[key][idxs, 0], self.data[key][idxs, 1]
+            )
+        # This didn't seem to work
+        # self.data_axes[key].relim()
+
+        xlim = [np.min(self.data[key][idxs, 0]), np.max(self.data[key][idxs, 0])]
+        ylim = [np.min(self.data[key][idxs, 1]), np.max(self.data[key][idxs, 1])]
+        self.data_axes[key].set_xlim(xlim)
+        self.data_axes[key].set_ylim(ylim)
 
     @QtCore.pyqtSlot()
     def maybe_refresh(self):
@@ -406,6 +452,10 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
                 layer.triggerRepaint()
         else:
             self.iface.mapCanvas().refresh()
+
+        # And, update the scalar data plot!
+        self.canvas.draw_idle()
+        self.canvas.flush_events()
 
     @QtCore.pyqtSlot(float, float)
     def initialize_origin(self, lon0, lat0):
@@ -490,6 +540,10 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.layers[key] = None
         self.sample_rates[key] = sample_rate
         self.last_updated[key] = 0.0
+        self.data_axes[key] = self.ax.twinx()
+        self.data_axes[key].set_ylabel(layer_name)
+        self.data_plots[key] = None
+        # TODO: Turn off xlabels?
 
         print("Searching scalar data group's children...")
         for ll in self.scalar_data_group.children():
