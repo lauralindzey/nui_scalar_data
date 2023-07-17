@@ -11,10 +11,8 @@ import time
 import yaml
 
 import PyQt5.QtWidgets as QtWidgets
-from PyQt5.QtWidgets import QAction, QDockWidget
-from PyQt5.QtGui import QIcon
+import PyQt5.QtGui as QtGui
 import PyQt5.QtCore as QtCore
-from PyQt5.QtCore import pyqtSignal, pyqtSlot, QObject
 
 import qgis.core
 from qgis.core import (
@@ -47,6 +45,22 @@ import inspect
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
 
 
+# Line classes from:
+# https://stackoverflow.com/questions/5671354/how-to-programmatically-make-a-horizontal-line-in-qt
+class QHLine(QtWidgets.QFrame):
+    def __init__(self):
+        super(QHLine, self).__init__()
+        self.setFrameShape(QtWidgets.QFrame.HLine)
+        self.setFrameShadow(QtWidgets.QFrame.Sunken)
+
+
+class QVLine(QtWidgets.QFrame):
+    def __init__(self):
+        super(QVLine, self).__init__()
+        self.setFrameShape(QtWidgets.QFrame.VLine)
+        self.setFrameShadow(QtWidgets.QFrame.Sunken)
+
+
 class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
     # If I understand correctly, any slots decorated with @pyqtSlot will be
     # called in the thread that created the connection, NOT the thread that
@@ -54,8 +68,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
     # the main Widget thread.
 
     # Otherwise, trying to add features to the layer will give a warning since parent object is in another thread.
-    received_origin = pyqtSignal(float, float)  # lon, lat in degrees
-    new_data = pyqtSignal(str, float, float)  # layer key, timestamp, value
+    received_origin = QtCore.pyqtSignal(float, float)  # lon, lat in degrees
+    new_data = QtCore.pyqtSignal(str, float, float)  # layer key, timestamp, value
 
     def __init__(self, iface, parent=None):
         super(NuiScalarDataMainWindow, self).__init__(parent)
@@ -173,6 +187,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
         self.vbox = QtWidgets.QVBoxLayout()
         self.vbox.addLayout(self.subscription_grid)
+        self.vbox.addWidget(QHLine())
         self.vbox.addStretch(1.0)
 
         self.hbox = QtWidgets.QHBoxLayout()
@@ -328,7 +343,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.lc.unsubscribe(self.subscribers[channel])
         self.received_origin.emit(msg.origin_longitude, msg.origin_latitude)
 
-    @pyqtSlot(str, float, float)
+    @QtCore.pyqtSlot(str, float, float)
     def update_data(self, key, tt, val):
         """
         I'm not sure if I'm going to have issues with interpolation + stateXY.
@@ -368,7 +383,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         )
         self.layers[key].dataProvider().addFeature(feature)
 
-    @pyqtSlot()
+    @QtCore.pyqtSlot()
     def maybe_refresh(self):
         """
         To avoid updating too frequently, we redraw at a fixed rate.
@@ -392,7 +407,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         else:
             self.iface.mapCanvas().refresh()
 
-    @pyqtSlot(float, float)
+    @QtCore.pyqtSlot(float, float)
     def initialize_origin(self, lon0, lat0):
         print(f"initialize_origin. lon={lon0}, lat={lat0}")
         self.lon0 = lon0
@@ -552,7 +567,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
 
 # Trying to inherit from QObject for now so I can set up signals/slots
-class NuiScalarDataPlugin(QObject):
+class NuiScalarDataPlugin(QtCore.QObject):
     def __init__(self, iface):
         """
         Re-use the appropriate layers if they exist, in order to let the user
@@ -569,8 +584,8 @@ class NuiScalarDataPlugin(QObject):
         """
         print("initGui")
         icon = os.path.join(os.path.join(cmd_folder, "nui.png"))
-        self.action = QAction(
-            QIcon(icon), "Display scalar data from NUI", self.iface.mainWindow()
+        self.action = QtWidgets.QAction(
+            QtGui.QIcon(icon), "Display scalar data from NUI", self.iface.mainWindow()
         )
         self.action.triggered.connect(self.run)
         self.iface.addPluginToMenu("&NUI Scalar Data", self.action)
