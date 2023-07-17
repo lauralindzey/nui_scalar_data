@@ -48,6 +48,8 @@ class NuiScalarDataDockWidget(QDockWidget):
     # called in the thread that created the connection, NOT the thread that
     # emitted the signal. So, use that to get data from the LCM thread into
     # the main Widget thread.
+
+    # Otherwise, trying to add features to the layer will give a warning since parent object is in another thread.
     received_origin = pyqtSignal(float, float)  # lon, lat in degrees
     new_data = pyqtSignal(str, float, float)  # layer key, timestamp, value
 
@@ -361,14 +363,23 @@ class NuiScalarDataDockWidget(QDockWidget):
         self.nui_group = self.root.findGroup("NUI")
         if self.nui_group is None:
             self.nui_group = self.root.insertGroup(0, "NUI")
+        self.scalar_data_group = self.nui_group.findGroup("Scalar Data")
+        if self.scalar_data_group is None:
+            self.scalar_data_group = self.nui_group.insertGroup(0, "Scalar Data")
 
         # TODO: Why isn't this finding the layer?!??
-        try:
-            self.cursor_layer = self.nui_group.findLayer("Scalar Data Cursor")
-        except Exception as ex:
-            print(ex)
-            self.cursor_layer = None
-        print("Tried to find cursor_layer. Is none?", self.cursor_layer is None)
+        self.cursor_layer = None
+        for ll in self.scalar_data_group.children():
+            print(ll.name())
+            if (
+                isinstance(ll, qgis.core.QgsLayerTreeLayer)
+                and ll.name() == "Scalar Data Cursor"
+            ):
+                self.cursor_layer = ll.layer()  # ll is a QgsLayerTreeLayer
+        print(
+            "Tried to find cursor_layer in NUI group. Is none?",
+            self.cursor_layer is None,
+        )
         # TODO: Probably also need to check whether it's the right type of layer...
         if self.cursor_layer is None:
             self.cursor_layer = QgsVectorLayer(
@@ -377,10 +388,8 @@ class NuiScalarDataDockWidget(QDockWidget):
                 "memory",
             )
             print("...Created cursor_layer")
-        # TODO(lindzey): AUUUUGH. This gives a warning since parent object is in another thread. I think I need to set up signals/slots maybe?
-        QgsProject.instance().addMapLayer(self.cursor_layer, False)
-        self.nui_group.addLayer(self.cursor_layer)
-        print("...Added cursor_layer to map")
+            QgsProject.instance().addMapLayer(self.cursor_layer, False)
+            self.scalar_data_group.addLayer(self.cursor_layer)
 
         print("done with setup_layers")
 
@@ -398,15 +407,26 @@ class NuiScalarDataDockWidget(QDockWidget):
             return
 
         self.data[key] = None
+        self.layers[key] = None
         self.sample_rates[key] = sample_rate
         self.last_updated[key] = 0.0
-        self.layers[key] = QgsVectorLayer(
-            f"Point?crs=epsg:4236&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
-            layer_name,
-            "memory",
-        )
-        QgsProject.instance().addMapLayer(self.layers[key], False)
-        self.nui_group.addLayer(self.layers[key])
+
+        print("Searching scalar data group's children...")
+        for ll in self.scalar_data_group.children():
+            print(ll.name())
+            if isinstance(ll, qgis.core.QgsLayerTreeLayer) and ll.name() == layer_name:
+                print(f"Found existing layer for {layer_name}")
+                self.layers[key] = ll.layer()
+        if self.layers[key] is None:
+            print("...creating layer.")
+            # TODO: Also need to double-check that it's the right type of layer
+            self.layers[key] = QgsVectorLayer(
+                f"Point?crs=epsg:4236&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
+                layer_name,
+                "memory",
+            )
+            QgsProject.instance().addMapLayer(self.layers[key], False)
+            self.scalar_data_group.addLayer(self.layers[key])
         print(f"Added layer '{layer_name}' to map")
 
         # QUESTION: Can we have multiple subscriptions to the same topic?
