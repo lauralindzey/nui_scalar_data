@@ -226,6 +226,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
         self.fig = Figure((8.0, 4.0), dpi=100)
         self.ax = self.fig.add_axes([0.1, 0.15, 0.8, 0.8])
+        self.cursor_vline = self.ax.axvline(0, 0, 1, ls="--", color="grey")
+        print("Functions defined for vline: ", dir(self.cursor_vline))
         # TODO: Turn off this one's y-labels/ticks?, because we won't use it, other than for twinning?
         self.time_formatter = FuncFormatter(
             lambda tt, pos: datetime.datetime.utcfromtimestamp(tt).strftime("%H:%M:%S")
@@ -247,9 +249,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.ax.get_yaxis().set_visible(False)
 
         self.canvas = FigureCanvas(self.fig)
-        # self.canvas.setFocusPolicy(QtCore.Qt.NoFocus)
-        # self.canvas.setParent(self.plot_widget)
-        # self.canvas.mpl_connect("motion_notify_event", self.on_motion_notify_event)
+        self.canvas.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.canvas.mpl_connect("motion_notify_event", self.on_motion_notify_event)
 
         # TODO: set of QRadioButtons (or checkboxes?) for displaying individual
         #   chunks of data on the plot
@@ -274,17 +275,42 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         When the user drags the mouse across the plot, want to update the
         cursor on the map as well.
         """
-        if event.inaxes is not self.ax:
-            # QgsMessageLog.logMessage("got motion that's not in the figure axes")
+        if event.inaxes is None:
+            # QgsMessageLog.logMessage(
+            #     f"got motion that's not in the figure axes. axes = {event.inaxes}"
+            # )
             return
         else:
-            QgsMessageLog.logMessage(f"got motion! mouse at {event.x}, {event.y}")
+            # QgsMessageLog.logMessage(
+            #     f"got motion in axis {event.inaxes}! mouse at {event.x}, {event.y}"
+            #  )
             data_xx, data_yy = self.ax.transData.inverted().transform(
                 (event.x, event.y)
             )
-            QgsMessageLog.logMessage(f"Which is at data coords {data_xx}, {data_yy}.")
+            # QgsMessageLog.logMessage(f"Which is at data coords {data_xx}, {data_yy}.")
 
-        # TODO: Figure out the timestamp corresponding to the event
+        tt = data_xx
+        self.cursor_vline.set_xdata(tt)
+
+        with self.data_locks["STATEXY"]:
+            xx = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 1])
+            yy = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 2])
+        lat, lon = xy2ll(xx, yy, self.lat0, self.lon0)
+        # print(f"Trying to set cursor at x,y = {xx}, {yy} / lon,lat = {lon}, {lat}")
+        pt = qgis.core.QgsPointXY(lon, lat)
+        geom = qgis.core.QgsGeometry.fromPointXY(pt)
+        # I tried to figure out how to just update the existing feature, but couldn't get its new coords to show in the map.
+        cursor_feature = qgis.core.QgsFeature()
+        cursor_feature.setGeometry(geom)
+        dt = datetime.datetime.utcfromtimestamp(tt)
+        cursor_feature.setAttributes([dt.strftime("%H:%M:%S.%f")])
+        with qgis.core.edit(self.cursor_layer):
+            for feat in self.cursor_layer.getFeatures():
+                self.cursor_layer.deleteFeature(feat.id())
+            self.cursor_layer.dataProvider().addFeature(cursor_feature)
+        # Don't wait for the 2Hz update; user will expect something more responsive.
+        self.maybe_refresh()
+
         # TODO: Add checkbox controlling whether the cursor is active
         # TODO: Add layer on map with cursor
         # TODO: Add cursor
@@ -442,18 +468,11 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             xx = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 1])
             yy = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 2])
         feature = qgis.core.QgsFeature()
-        print(
-            f"xy2ll(0, 0, {self.lat0}, {self.lon0} = {xy2ll(0, 0, self.lat0, self.lon0)})"
-        )
-        print(
-            f"xy2ll(10, 10, {self.lat0}, {self.lon0} = {xy2ll(10, 10, self.lat0, self.lon0)})"
-        )
-        print(
-            f"xy2ll({xx}, {yy}, {self.lat0}, {self.lon0} = {xy2ll(xx, yy, self.lat0, self.lon0)})"
-        )
         lat, lon = xy2ll(xx, yy, self.lat0, self.lon0)
         pt = qgis.core.QgsPointXY(lon, lat)
         geom = qgis.core.QgsGeometry.fromPointXY(pt)
+        # NOTE(lindzey): We could probably go back to this. The issue was using the wrong
+        # EPSG code on the layers themselves, rather than AlvinXY vs something else.
         # geom.transform(self.tr)
         feature.setGeometry(geom)
         dt = datetime.datetime.utcfromtimestamp(tt)
@@ -573,6 +592,12 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             print("...Created cursor_layer")
             QgsProject.instance().addMapLayer(self.cursor_layer, False)
             self.scalar_data_group.addLayer(self.cursor_layer)
+        cursor_feature = qgis.core.QgsFeature()
+        pt = qgis.core.QgsPointXY(self.lon0, self.lat0)
+        geom = qgis.core.QgsGeometry.fromPointXY(pt)
+        cursor_feature.setGeometry(geom)
+        cursor_feature.setAttributes(["0"])
+        self.cursor_layer.dataProvider().addFeature(cursor_feature)
 
         print("done with setup_layers")
 
