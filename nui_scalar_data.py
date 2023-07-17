@@ -1,5 +1,6 @@
 import datetime
 import importlib
+import math
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, ScalarFormatter
@@ -60,6 +61,46 @@ class QVLine(QtWidgets.QFrame):
         super(QVLine, self).__init__()
         self.setFrameShape(QtWidgets.QFrame.VLine)
         self.setFrameShadow(QtWidgets.QFrame.Sunken)
+
+
+# I tried using the Proj4 ortho projection, but that didn't seem to match expected
+# So, since our layers will all be in EPSG:4326, I'll use code ported from
+# dslpp/mfiles/utils/conversions/xy2ll.m
+def ll2xy(lat, lon, lat_0, lon_0):
+    if lon > 180:
+        lon = lon - 360
+    if lon < -180:
+        lon = lon + 360
+    xx = (lon - lon_0) * mdeglon(lat_0)
+    yy = (lat - lat_0) * mdeglat(lat_0)
+    return (xx, yy)
+
+
+def xy2ll(xx, yy, lat_0, lon_0):
+    lon = xx / mdeglon(lat_0) + lon_0
+    lat = yy / mdeglat(lat_0) + lat_0
+    return lat, lon
+
+
+def mdeglat(lat_deg):
+    latrad = math.radians(lat_deg)
+    dy = (
+        111132.09
+        - 566.05 * math.cos(2.0 * latrad)
+        + 1.20 * math.cos(4.0 * latrad)
+        - 0.002 * math.cos(6.0 * latrad)
+    )
+    return dy
+
+
+def mdeglon(lat_deg):
+    latrad = math.radians(lat_deg)
+    dx = (
+        111415.13 * math.cos(latrad)
+        - 94.55 * math.cos(3.0 * latrad)
+        + 0.12 * math.cos(5.0 * latrad)
+    )
+    return dx
 
 
 class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
@@ -401,9 +442,19 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             xx = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 1])
             yy = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 2])
         feature = qgis.core.QgsFeature()
-        pt = qgis.core.QgsPointXY(xx, yy)
+        print(
+            f"xy2ll(0, 0, {self.lat0}, {self.lon0} = {xy2ll(0, 0, self.lat0, self.lon0)})"
+        )
+        print(
+            f"xy2ll(10, 10, {self.lat0}, {self.lon0} = {xy2ll(10, 10, self.lat0, self.lon0)})"
+        )
+        print(
+            f"xy2ll({xx}, {yy}, {self.lat0}, {self.lon0} = {xy2ll(xx, yy, self.lat0, self.lon0)})"
+        )
+        lat, lon = xy2ll(xx, yy, self.lat0, self.lon0)
+        pt = qgis.core.QgsPointXY(lon, lat)
         geom = qgis.core.QgsGeometry.fromPointXY(pt)
-        geom.transform(self.tr)
+        # geom.transform(self.tr)
         feature.setGeometry(geom)
         dt = datetime.datetime.utcfromtimestamp(tt)
         feature.setAttributes(
@@ -449,7 +500,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
                 # I'm not sure how this wound up getting called while layer was None.
                 # I thought all things touching the layer were in the same thread,
                 # and that layer creation would finish before this was called.
-                if layer is not None:
+                if layer is not None and layer.isValid():
                     layer.triggerRepaint()
         else:
             self.iface.mapCanvas().refresh()
@@ -464,15 +515,16 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.lon0 = lon0
         self.lat0 = lat0
         self.crs = QgsCoordinateReferenceSystem()
+        # AlvinXY uses the Clark 1866 ellipsoid; it predates WGS84
         self.crs.createFromProj4(
-            f"+proj=ortho +lat_0={self.lat0} +lon_0={self.lon0} +ellps=WGS84"
+            f"+proj=ortho +lat_0={self.lat0} +lon_0={self.lon0} +ellps=clrk66"
         )
         print(f"Created CRS! isValid = {self.crs.isValid()}")
         self.crs_name = "NuiXY"
         self.crs.saveAsUserCrs(self.crs_name)
         # For some reason, setting this custom CRS on a layer doesn't work, but it's fine
         # for projecting points between.
-        self.map_crs = QgsCoordinateReferenceSystem("epsg:4236")
+        self.map_crs = QgsCoordinateReferenceSystem("epsg:4326")
         self.tr = QgsCoordinateTransform(self.crs, self.map_crs, QgsProject.instance())
         self.projection_initialized = True
 
@@ -514,7 +566,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         # TODO: Probably also need to check whether it's the right type of layer...
         if self.cursor_layer is None:
             self.cursor_layer = QgsVectorLayer(
-                f"Point?crs=epsg:4236&field=time:string(30)&index=yes",
+                f"Point?crs=epsg:4326&field=time:string(30)&index=yes",
                 "Scalar Data Cursor",
                 "memory",
             )
@@ -589,7 +641,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             print("...creating layer.")
             # TODO: Also need to double-check that it's the right type of layer
             self.layers[key] = QgsVectorLayer(
-                f"Point?crs=epsg:4236&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
+                f"Point?crs=epsg:4326&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
                 layer_name,
                 "memory",
             )
