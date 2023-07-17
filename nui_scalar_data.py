@@ -55,42 +55,7 @@ class NuiScalarDataDockWidget(QDockWidget):
         super(NuiScalarDataDockWidget, self).__init__(parent)
         self.iface = iface
 
-        self.grid = QtWidgets.QGridLayout()
-
-        # self.add_field(channel, msg_type, msg_field, layer_name)
-        self.channel_name_label = QtWidgets.QLabel("Channel:")
-        self.channel_name_lineedit = QtWidgets.QLineEdit()
-        self.grid.addWidget(self.channel_name_label, 0, 0)
-        self.grid.addWidget(self.channel_name_lineedit, 0, 1)
-
-        self.msg_type_label = QtWidgets.QLabel("LCM type:")
-        self.msg_type_lineedit = QtWidgets.QLineEdit()
-        self.grid.addWidget(self.msg_type_label, 1, 0)
-        self.grid.addWidget(self.msg_type_lineedit, 1, 1)
-
-        self.msg_field_label = QtWidgets.QLabel("Field:")
-        self.msg_field_lineedit = QtWidgets.QLineEdit()
-        self.grid.addWidget(self.msg_field_label, 2, 0)
-        self.grid.addWidget(self.msg_field_lineedit, 2, 1)
-
-        self.layer_name_label = QtWidgets.QLabel("Layer name:")
-        self.layer_name_lineedit = QtWidgets.QLineEdit()
-        self.grid.addWidget(self.layer_name_label, 3, 0)
-        self.grid.addWidget(self.layer_name_lineedit, 3, 1)
-
-        self.add_field_button = QtWidgets.QPushButton("Add Field")
-        self.add_field_button.clicked.connect(self.add_button_clicked)
-        self.grid.addWidget(self.add_field_button, 4, 0, 1, 2)
-
-        # TODO: set of QRadioButtons (or checkboxes?) for displaying individual
-        #   chunks of data on the plot
-        # TODO: Add actual matplotlib plot
-
-        self.my_widget = QtWidgets.QWidget()
-        self.my_widget.setLayout(self.grid)
-
-        self.setWidget(self.my_widget)
-        self.setWindowTitle("NUI Scalar Data")
+        self.setup_ui()
 
         # TODO: I think there's a cleaner way to dynamically import LCM types,
         #   but this works for now.
@@ -102,6 +67,10 @@ class NuiScalarDataDockWidget(QDockWidget):
         self.layers = {}
         # layer_name -> np.array where 1st column is time and 2nd is data
         self.data = {}
+        # layer_name -> sample rate
+        self.sample_rates = {}
+        # layer_name -> timestamp of most recently-added feature (used for decimation)
+        self.last_updated = {}
 
         # Everything NUI does is in the AlvinXY coordinate frame, with origin
         # as defined in the DIVE_INI message. So, we can't set up layers until
@@ -135,6 +104,54 @@ class NuiScalarDataDockWidget(QDockWidget):
         # TODO: consider shutting down plugin when the dockwidget is closed. Right now,
         #  the LCM callbacks just keep on being called.
         self.shutdown = False
+
+    def setup_ui(self):
+        self.grid = QtWidgets.QGridLayout()
+
+        # self.add_field(channel, msg_type, msg_field, layer_name)
+        row = 0
+        self.channel_name_label = QtWidgets.QLabel("Channel:")
+        self.channel_name_lineedit = QtWidgets.QLineEdit()
+        self.grid.addWidget(self.channel_name_label, row, 0)
+        self.grid.addWidget(self.channel_name_lineedit, row, 1)
+        row += 1
+
+        self.msg_type_label = QtWidgets.QLabel("LCM type:")
+        self.msg_type_lineedit = QtWidgets.QLineEdit()
+        self.grid.addWidget(self.msg_type_label, row, 0)
+        self.grid.addWidget(self.msg_type_lineedit, row, 1)
+        row += 1
+
+        self.msg_field_label = QtWidgets.QLabel("Field:")
+        self.msg_field_lineedit = QtWidgets.QLineEdit()
+        self.grid.addWidget(self.msg_field_label, row, 0)
+        self.grid.addWidget(self.msg_field_lineedit, row, 1)
+        row += 1
+
+        self.sample_rate_label = QtWidgets.QLabel("Rate (Hz):")
+        self.sample_rate_lineedit = QtWidgets.QLineEdit()
+        self.grid.addWidget(self.sample_rate_label, row, 0)
+        self.grid.addWidget(self.sample_rate_lineedit, row, 1)
+        row += 1
+
+        self.layer_name_label = QtWidgets.QLabel("Layer name:")
+        self.layer_name_lineedit = QtWidgets.QLineEdit()
+        self.grid.addWidget(self.layer_name_label, row, 0)
+        self.grid.addWidget(self.layer_name_lineedit, row, 1)
+        row += 1
+
+        self.add_field_button = QtWidgets.QPushButton("Add Field")
+        self.add_field_button.clicked.connect(self.add_button_clicked)
+        self.grid.addWidget(self.add_field_button, row, 0, 1, 2)
+
+        # TODO: set of QRadioButtons (or checkboxes?) for displaying individual
+        #   chunks of data on the plot
+        # TODO: Add actual matplotlib plot
+        self.my_widget = QtWidgets.QWidget()
+        self.my_widget.setLayout(self.grid)
+
+        self.setWidget(self.my_widget)
+        self.setWindowTitle("NUI Scalar Data")
 
     def add_button_clicked(self, _checked):
         print("add_button_clicked")
@@ -189,6 +206,16 @@ class NuiScalarDataDockWidget(QDockWidget):
             return
         print(f"msg_field = {msg_field}")
 
+        sample_rate_str = self.sample_rate_lineedit.text()
+        try:
+            sample_rate = float(sample_rate_str)
+        except Exception as ex:
+            errmsg = "Couldn't convert input '{sample_rate_str}' into float."
+            print(errmsg)
+            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
+            QgsMessageLog.logMessage(errmsg)
+            return
+
         layer_name = self.layer_name_lineedit.text()
         if layer_name.strip() == "":
             errmsg = "Please select non-empty layer name."
@@ -201,7 +228,7 @@ class NuiScalarDataDockWidget(QDockWidget):
         # TODO: Call function adding layer. Will need to check whether our projection has been initialized.
         # Ah! This probably can't be a function call, unless we move everything
         # into the widget.
-        self.add_field(channel_name, msg_type, msg_field, layer_name)
+        self.add_field(channel_name, msg_type, msg_field, sample_rate, layer_name)
 
     def handle_statexy(self, channel, data):
         """ "
@@ -250,6 +277,20 @@ class NuiScalarDataDockWidget(QDockWidget):
         With longer delays, might wind up wanting to hold on to scalar data and only
         plot it after we have updated positions...but for now, adding it to layers as it comes in.
         """
+        # Decimate the features that we actually show, since QGIS is displeased by
+        # layers with tens or hundreds of thousands of features.
+        # QUESTION: better way to get this? it's somewhere in the layer ...
+        dt = tt - self.last_updated[key]
+        period = 1.0 / self.sample_rates[key]
+        if dt < period:
+            return
+        self.last_updated[key] = tt
+
+        if self.data[key] is None:
+            self.data[key] = np.array([[tt, val]])
+        else:
+            self.data[key] = np.append(self.data[key], np.array([[tt, val]]))
+
         # Do the interpolation in NuiXY coords, then transform into lat/lon before adding the feature to the layer.
         with self.data_locks["STATEXY"]:
             xx = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 1])
@@ -343,7 +384,7 @@ class NuiScalarDataDockWidget(QDockWidget):
 
         print("done with setup_layers")
 
-    def add_field(self, channel, msg_type, msg_field, layer_name):
+    def add_field(self, channel, msg_type, msg_field, sample_rate, layer_name):
         """
         Subscribe to specified data and plot in both map and profile view.
         """
@@ -356,6 +397,9 @@ class NuiScalarDataDockWidget(QDockWidget):
             QgsMessageLog.logMessage(errmsg)
             return
 
+        self.data[key] = None
+        self.sample_rates[key] = sample_rate
+        self.last_updated[key] = 0.0
         self.layers[key] = QgsVectorLayer(
             f"Point?crs=epsg:4236&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
             layer_name,
