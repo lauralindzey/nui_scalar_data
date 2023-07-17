@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+import yaml
 
 import PyQt5.QtWidgets as QtWidgets
 from PyQt5.QtWidgets import QAction, QDockWidget
@@ -56,6 +57,18 @@ class NuiScalarDataDockWidget(QDockWidget):
     def __init__(self, iface, parent=None):
         super(NuiScalarDataDockWidget, self).__init__(parent)
         self.iface = iface
+
+        try:
+            config_str, success = QgsProject.instance().readEntry(
+                "nui_scalar_data", "subscriptions"
+            )
+            if success:
+                self.config = yaml.safe_load(config_str)
+                print(f"Loaded config! {self.config}")
+            else:
+                self.config = []
+        except Exception as ex:
+            self.config = []
 
         self.setup_ui()
 
@@ -110,7 +123,6 @@ class NuiScalarDataDockWidget(QDockWidget):
     def setup_ui(self):
         self.grid = QtWidgets.QGridLayout()
 
-        # self.add_field(channel, msg_type, msg_field, layer_name)
         row = 0
         self.channel_name_label = QtWidgets.QLabel("Channel:")
         self.channel_name_lineedit = QtWidgets.QLineEdit()
@@ -230,7 +242,16 @@ class NuiScalarDataDockWidget(QDockWidget):
         # TODO: Call function adding layer. Will need to check whether our projection has been initialized.
         # Ah! This probably can't be a function call, unless we move everything
         # into the widget.
-        self.add_field(channel_name, msg_type, msg_field, sample_rate, layer_name)
+        self.config.append(
+            [channel_name, msg_type_str, msg_field, sample_rate, layer_name]
+        )
+        print(f"Trying to save config. type = {type(self.config)}: {self.config}")
+        config_str = yaml.safe_dump(self.config)
+        print(f"Resulting yaml string: {config_str}")
+        QgsProject.instance().writeEntry(
+            "nui_scalar_data", "subscriptions", yaml.safe_dump(self.config)
+        )
+        self.add_field(channel_name, msg_type_str, msg_field, sample_rate, layer_name)
 
     def handle_statexy(self, channel, data):
         """ "
@@ -351,6 +372,11 @@ class NuiScalarDataDockWidget(QDockWidget):
         self.projection_initialized = True
 
         self.setup_layers()
+        self.update_subscriptions()  # Activate any subscriptions from the config
+
+    def update_subscriptions(self):
+        for channel, msg_type_str, msg_field, sample_rate, layer_name in self.config:
+            self.add_field(channel, msg_type_str, msg_field, sample_rate, layer_name)
 
     def setup_layers(self):
         """
@@ -393,7 +419,7 @@ class NuiScalarDataDockWidget(QDockWidget):
 
         print("done with setup_layers")
 
-    def add_field(self, channel, msg_type, msg_field, sample_rate, layer_name):
+    def add_field(self, channel, msg_type_str, msg_field, sample_rate, layer_name):
         """
         Subscribe to specified data and plot in both map and profile view.
         """
@@ -431,6 +457,11 @@ class NuiScalarDataDockWidget(QDockWidget):
 
         # QUESTION: Can we have multiple subscriptions to the same topic?
         # (e.g. if I want temperature and salinity ...)
+        msg_pkg, msg_class = msg_type_str.split(".")
+        # If reading from config, won't already be loaded.
+        if msg_pkg not in self.msg_modules:
+            self.msg_modules[msg_pkg] = importlib.import_module(msg_pkg)
+        msg_type = getattr(self.msg_modules[msg_pkg], msg_class)
         self.subscribers[key] = self.lc.subscribe(
             channel,
             lambda channel, data, msg_type=msg_type, msg_field=msg_field: self.handle_data(
