@@ -143,6 +143,17 @@ class ScalarDataMapLayerManager(QtCore.QObject):
         self.update_timer.setSingleShot(False)
         self.update_timer.start(500)  # ms
 
+    def closeEvent(self, _event):
+        self.update_timer.stop()
+
+        for key, sub in self.subscribers.items():
+            print(f"Unsubscribing from {key}")
+            try:
+                self.lc.unsubscribe(sub)
+            except Exception as ex:
+                # If we've already unsubscribed from DIVE_INI, this will fail.
+                print(ex)
+
     def setup_groups(self):
         """
         Initializes NUI's root group / the scalar data root.
@@ -344,7 +355,7 @@ class ScalarDataMapLayerManager(QtCore.QObject):
                 print("... deleting existing features.")
                 with qgis.core.edit(self.layers[key]):
                     for feat in self.layers[key].getFeatures():
-                        # self.layers[key].deleteFeature(feat.id())
+                        self.layers[key].deleteFeature(feat.id())
                         pass
         if self.layers[key] is None:
             print("...creating layer.")
@@ -359,48 +370,18 @@ class ScalarDataMapLayerManager(QtCore.QObject):
         print(f"Added layer '{layer_name}' to map")
 
 
-class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
-    # If I understand correctly, any slots decorated with @pyqtSlot will be
-    # called in the thread that created the connection, NOT the thread that
-    # emitted the signal. So, use that to get data from the LCM thread into
-    # the main Widget thread.
+# QUESTION(lindzey): Should this BE a FigureCanvas, rather than having the main
+#   class access the cansas member in order to embed it into the UI?
+class ScalarDataPlotter(QtCore.QObject):
+    cursor_moved = QtCore.pyqtSignal(float)  # new timestamp, in seconds since epoch
 
-    # Otherwise, trying to add features to the layer will give a warning since parent object is in another thread.
-    new_data = QtCore.pyqtSignal(str, float, float)  # layer key, timestamp, value
+    def __init__(self):
+        super(ScalarDataPlotter, self).__init__()
+        ######
+        # Handle data stuff
 
-    def __init__(self, iface, parent=None):
-        super(NuiScalarDataMainWindow, self).__init__(parent)
-        self.iface = iface
-        self.lc = lcm.LCM("udpm://239.255.76.67:7667?ttl=0")
-        self.map_layer_manager = ScalarDataMapLayerManager(self.iface, self.lc)
-
-        self.config = []  # This gets updated by the add_field method
-        try:
-            config_str, success = QgsProject.instance().readEntry(
-                "nui_scalar_data", "subscriptions"
-            )
-            if success:
-                self.loaded_config = yaml.safe_load(config_str)
-                print(f"Loaded config! {self.loaded_config}")
-            else:
-                self.loaded_config = []
-        except Exception as ex:
-            self.loaded_config = []
-
-        self.setup_ui()
-
-        # TODO: I think there's a cleaner way to dynamically import LCM types,
-        #   but this works for now.
-        self.msg_modules = {}
-
-        ####
-        # Moving stuff from the original QObject
         # layer_name -> np.array where 1st column is time and 2nd is data
         self.data = {}
-        # layer_name -> sample rate
-        self.sample_rates = {}
-        # layer_name -> timestamp of most recently-added feature (used for decimation)
-        self.last_updated = {}
         # layer_name -> axes object for plotting
         self.data_axes = {}
         self.data_plots = {}
@@ -409,28 +390,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         # on top of each other, and by default, each axis gets its own cycler.
         self.color_cycler = plt.rcParams["axes.prop_cycle"]()
 
-        self.subscribers = {}
-        self.data_locks = {}
-        self.data = {}
-
-        self.new_data.connect(self.update_data)
-        # For now, the parent class is handling throttling. Might make sense
-        # to push that down into the child classes when I finish refactoring.
-        # self.new_data.connect(self.map_layer_manager.update_data)
-
-        self.update_timer = QtCore.QTimer()
-        self.update_timer.timeout.connect(self.maybe_refresh)
-        self.update_timer.setSingleShot(False)
-        self.update_timer.start(500)  # ms
-
-        self.shutdown = False
-
-        self.update_subscriptions()  # Activate any subscriptions from the config
-
-    def setup_ui(self):
-        self.data_selector = ScalarDataFieldWidget(self.iface)
-        self.data_selector.new_field.connect(self.add_field)
-
+        ######
+        # Handle GUI stuff
         self.fig = Figure((8.0, 4.0), dpi=100)
         self.ax = self.fig.add_axes([0.1, 0.15, 0.8, 0.8])
         self.cursor_vline = self.ax.axvline(0, 0, 1, ls="--", color="grey")
@@ -455,25 +416,11 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setFocusPolicy(QtCore.Qt.NoFocus)
+        # TODO: motion notify event is annoying; change to a mouse click?
         self.canvas.mpl_connect("motion_notify_event", self.on_motion_notify_event)
 
-        # TODO: set of QRadioButtons (or checkboxes?) for displaying individual
-        #   chunks of data on the plot
-
-        self.vbox = QtWidgets.QVBoxLayout()
-        self.vbox.addWidget(self.data_selector)
-        self.vbox.addWidget(QHLine())
-        self.vbox.addStretch(1.0)
-
-        self.hbox = QtWidgets.QHBoxLayout()
-        self.hbox.addLayout(self.vbox)
-        self.hbox.addWidget(self.canvas, stretch=5)
-
-        self.my_widget = QtWidgets.QWidget()
-        self.my_widget.setLayout(self.hbox)
-
-        self.setCentralWidget(self.my_widget)
-        self.setWindowTitle("NUI Scalar Data")
+    def closeEvent(self, event):
+        pass
 
     def on_motion_notify_event(self, event):
         """
@@ -499,7 +446,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
         tt = data_xx
         self.cursor_vline.set_xdata(tt)
-        self.map_layer_manager.update_cursor(tt)
+        self.cursor_moved.emit(tt)
 
         # Don't wait for the 2Hz update; user will expect something more responsive.
         self.maybe_refresh()
@@ -509,86 +456,10 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         # TODO: Add cursor
         # TODO: Add second axis, with twinx?
 
-    @QtCore.pyqtSlot(str, float, float)
-    def update_data(self, key, tt, val):
-        """ """
-        # Decimate the features that we actually show, since QGIS is displeased by
-        # layers with tens or hundreds of thousands of features.
-        # QUESTION: better way to get this timestamp? it's somewhere in the layer ...
-        dt = tt - self.last_updated[key]
-        period = 1.0 / self.sample_rates[key]
-        if dt < period:
-            return
-        self.last_updated[key] = tt
-
-        if self.data[key] is None:
-            self.data[key] = np.array([[tt, val]])
-        else:
-            self.data[key] = np.append(self.data[key], np.array([[tt, val]]), axis=0)
-
-        if self.plot_length < 0:
-            (idxs,) = np.where(self.data[key][:, 0] > 0)
-        else:
-            t0 = np.max(self.data[key][:, 0]) - self.plot_length
-            (idxs,) = np.where(self.data[key][:, 0] > t0)
-
-        self.data_plots[key].set_data(self.data[key][idxs, 0], self.data[key][idxs, 1])
-
-        # NOTE(lindzey): I expect this to be replaced by a singal/slot
-        #   when I finish the refactoring and also pull out the time series plots.
-        self.map_layer_manager.update_data(key, tt, val)
-
-        # This didn't seem to work
-        # self.data_axes[key].relim()
-        xlim = [np.min(self.data[key][idxs, 0]), np.max(self.data[key][idxs, 0])]
-        ylim = [np.min(self.data[key][idxs, 1]), np.max(self.data[key][idxs, 1])]
-        self.data_axes[key].set_xlim(xlim)
-        self.data_axes[key].set_ylim(ylim)
-
-    @QtCore.pyqtSlot()
-    def maybe_refresh(self):
-        """
-        To avoid updating too frequently, we redraw at a fixed rate.
-        This one just updates the scalar data plot.
-        """
-        # And, update the scalar data plot!
-        self.canvas.draw_idle()
-        self.canvas.flush_events()
-
-    def update_subscriptions(self):
-        for (
-            channel,
-            msg_type_str,
-            msg_field,
-            sample_rate,
-            layer_name,
-        ) in self.loaded_config:
-            self.add_field(channel, msg_type_str, msg_field, sample_rate, layer_name)
-
-    def add_field(self, channel, msg_type_str, msg_field, sample_rate, layer_name):
-        """
-        Subscribe to specified data and plot in both map and profile view.
-        """
-        self.config.append([channel, msg_type_str, msg_field, sample_rate, layer_name])
-        # NOTE(lindzey): It might be more idiomatic to save this on close, rather than
-        #  at every update?
-        QgsProject.instance().writeEntry(
-            "nui_scalar_data", "subscriptions", yaml.safe_dump(self.config)
-        )
-
-        key = f"{channel}/{msg_field}"
-        print(f"add_field for key={key}")
-        if key in self.data:
-            errmsg = f"Duplicate field '{key}'"
-            print(errmsg)
-            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
-            QgsMessageLog.logMessage(errmsg)
-            return
-
+    def add_field(self, key, layer_name):
         self.data[key] = None
-        self.sample_rates[key] = sample_rate
-        self.last_updated[key] = 0.0
         self.data_axes[key] = self.ax.twinx()
+
         # Try to split labels across left/right for readability
         if len(self.fig.axes) % 2 == 0:
             self.data_axes[key].yaxis.set_label_position("left")
@@ -616,6 +487,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
                 labeltop=False,
                 labelbottom=False,
             )
+
         # Set colors for each axes
         self.data_axes[key].set_ylabel(layer_name)
         self.data_axes[key].yaxis.set_major_formatter(ScalarFormatter(useOffset=False))
@@ -626,6 +498,168 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             [], [], ".", markersize=1, color=color, label=layer_name
         )
 
+    @QtCore.pyqtSlot()
+    def maybe_refresh(self):
+        """
+        To avoid updating too frequently, we redraw at a fixed rate.
+        This one just updates the scalar data plot.
+        """
+        # And, update the scalar data plot!
+        self.canvas.draw_idle()
+        self.canvas.flush_events()
+
+    @QtCore.pyqtSlot(str, float, float)
+    def update_data(self, key, tt, val):
+        if self.data[key] is None:
+            self.data[key] = np.array([[tt, val]])
+        else:
+            self.data[key] = np.append(self.data[key], np.array([[tt, val]]), axis=0)
+
+        if self.plot_length < 0:
+            (idxs,) = np.where(self.data[key][:, 0] > 0)
+        else:
+            t0 = np.max(self.data[key][:, 0]) - self.plot_length
+            (idxs,) = np.where(self.data[key][:, 0] > t0)
+
+        self.data_plots[key].set_data(self.data[key][idxs, 0], self.data[key][idxs, 1])
+
+        # This didn't seem to work
+        # self.data_axes[key].relim()
+        xlim = [np.min(self.data[key][idxs, 0]), np.max(self.data[key][idxs, 0])]
+        ylim = [np.min(self.data[key][idxs, 1]), np.max(self.data[key][idxs, 1])]
+        self.data_axes[key].set_xlim(xlim)
+        self.data_axes[key].set_ylim(ylim)
+
+
+class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
+    # If I understand correctly, any slots decorated with @pyqtSlot will be
+    # called in the thread that created the connection, NOT the thread that
+    # emitted the signal. So, use that to get data from the LCM thread into
+    # the main Widget thread.
+
+    # Otherwise, trying to add features to the layer will give a warning since parent object is in another thread.
+    new_data = QtCore.pyqtSignal(str, float, float)  # layer key, timestamp, value
+
+    def __init__(self, iface, parent=None):
+        super(NuiScalarDataMainWindow, self).__init__(parent)
+        self.iface = iface
+        self.lc = lcm.LCM("udpm://239.255.76.67:7667?ttl=0")
+
+        self.map_layer_manager = ScalarDataMapLayerManager(self.iface, self.lc)
+
+        self.data_selector = ScalarDataFieldWidget(self.iface)
+        self.data_selector.new_field.connect(self.add_field)
+
+        self.scalar_plotter = ScalarDataPlotter()
+        self.scalar_plotter.cursor_moved.connect(self.map_layer_manager.update_cursor)
+
+        self.config = []  # This gets updated by the add_field method
+        try:
+            config_str, success = QgsProject.instance().readEntry(
+                "nui_scalar_data", "subscriptions"
+            )
+            if success:
+                self.loaded_config = yaml.safe_load(config_str)
+                print(f"Loaded config! {self.loaded_config}")
+            else:
+                self.loaded_config = []
+        except Exception as ex:
+            self.loaded_config = []
+
+        self.setup_ui()
+
+        # TODO: I think there's a cleaner way to dynamically import LCM types,
+        #   but this works for now.
+        self.msg_modules = {}
+
+        # layer_name -> sample rate
+        self.sample_rates = {}
+        # layer_name -> timestamp of most recently-added feature (used for decimation)
+        self.last_updated = {}
+
+        self.subscribers = {}
+
+        self.new_data.connect(self.update_data)
+        # For now, the parent class is handling throttling. Might make sense
+        # to push that down into the child classes when I finish refactoring.
+        # self.new_data.connect(self.map_layer_manager.update_data)
+        # self.new_data.connect(self.scalar_plotter.update_data)
+
+        self.update_timer = QtCore.QTimer()
+        self.update_timer.timeout.connect(self.scalar_plotter.maybe_refresh)
+        self.update_timer.setSingleShot(False)
+        self.update_timer.start(500)  # ms
+
+        self.shutdown = False
+
+        self.update_subscriptions()  # Activate any subscriptions from the config
+
+    def setup_ui(self):
+        # TODO: set of QRadioButtons (or checkboxes?) for displaying individual
+        #   chunks of data on the plot
+
+        self.vbox = QtWidgets.QVBoxLayout()
+        self.vbox.addWidget(self.data_selector)
+        self.vbox.addWidget(QHLine())
+        self.vbox.addStretch(1.0)
+
+        self.hbox = QtWidgets.QHBoxLayout()
+        self.hbox.addLayout(self.vbox)
+        self.hbox.addWidget(self.scalar_plotter.canvas, stretch=5)
+
+        self.my_widget = QtWidgets.QWidget()
+        self.my_widget.setLayout(self.hbox)
+
+        self.setCentralWidget(self.my_widget)
+        self.setWindowTitle("NUI Scalar Data")
+
+    @QtCore.pyqtSlot(str, float, float)
+    def update_data(self, key, tt, val):
+        """ """
+        # Decimate the features that we actually show, since QGIS is displeased by
+        # layers with tens or hundreds of thousands of features.
+        # QUESTION: better way to get this timestamp? it's somewhere in the layer ...
+        dt = tt - self.last_updated[key]
+        period = 1.0 / self.sample_rates[key]
+        if dt < period:
+            return
+        self.last_updated[key] = tt
+
+        # NOTE(lindzey): I expect this to be replaced by a singal/slot
+        #   when I finish the refactoring and also pull out the time series plots.
+        # TODO: Directly attach these slots to the original signal, after pushing
+        #    throttling logic into them?
+        self.map_layer_manager.update_data(key, tt, val)
+        self.scalar_plotter.update_data(key, tt, val)
+
+    def update_subscriptions(self):
+        for (
+            channel,
+            msg_type_str,
+            msg_field,
+            sample_rate,
+            layer_name,
+        ) in self.loaded_config:
+            self.add_field(channel, msg_type_str, msg_field, sample_rate, layer_name)
+
+    def add_field(self, channel, msg_type_str, msg_field, sample_rate, layer_name):
+        """
+        Subscribe to specified data and plot in both map and profile view.
+        """
+        key = f"{channel}/{msg_field}"
+        print(f"add_field for key={key}")
+        if key in self.sample_rates:
+            errmsg = f"Duplicate field '{key}'"
+            print(errmsg)
+            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
+            QgsMessageLog.logMessage(errmsg)
+            return
+        self.config.append([channel, msg_type_str, msg_field, sample_rate, layer_name])
+
+        self.sample_rates[key] = sample_rate
+        self.last_updated[key] = 0.0
+
+        self.scalar_plotter.add_field(key, layer_name)
         self.map_layer_manager.add_field(key, layer_name)
 
         # QUESTION: Can we have multiple subscriptions to the same topic?
@@ -682,6 +716,12 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
                 # If we've already unsubscribed from DIVE_INI, this will fail.
                 print(ex)
 
+        self.map_layer_manager.closeEvent(event)
+        self.scalar_plotter.closeEvent(event)
+
+        QgsProject.instance().writeEntry(
+            "nui_scalar_data", "subscriptions", yaml.safe_dump(self.config)
+        )
         event.accept()
 
 
