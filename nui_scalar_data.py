@@ -9,7 +9,6 @@ import numpy as np
 import os
 import sys
 import threading
-import time
 import yaml
 
 import PyQt5.QtWidgets as QtWidgets
@@ -23,12 +22,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsMessageLog,
     QgsProject,
-    QgsVectorDataProvider,
     QgsVectorLayer,
-)
-
-from qgis.gui import (
-    QgsMessageBar,
 )
 
 # For running on OSX. In Ubuntu, use python3.8
@@ -41,7 +35,12 @@ import lcm
 from comms import statexy_t
 from ini import dive_t  # for origin_latitude, origin_longitude
 
-from .nui_scalar_data_widgets import ScalarDataFieldWidget, QHLine, QVLine
+from .nui_scalar_data_widgets import (
+    AddScalarDataFieldWidget,
+    ConfigureTimeSeriesWidget,
+    QHLine,
+    QVLine,
+)
 
 import inspect
 
@@ -88,7 +87,7 @@ def mdeglon(lat_deg):
     return dx
 
 
-class ScalarDataMapLayerManager(QtCore.QObject):
+class MapLayerPlotter(QtCore.QObject):
     """
     Class in charge of managing all QGIS map/layer/etc. interfaces.
 
@@ -107,7 +106,7 @@ class ScalarDataMapLayerManager(QtCore.QObject):
     received_origin = QtCore.pyqtSignal(float, float)  # lon, lat in degrees
 
     def __init__(self, iface, lc):
-        super(ScalarDataMapLayerManager, self).__init__()
+        super(MapLayerPlotter, self).__init__()
         self.iface = iface
         self.lc = lc
         # layer_name -> QgsVectorLayer to add features to
@@ -372,13 +371,11 @@ class ScalarDataMapLayerManager(QtCore.QObject):
         print(f"Added layer '{layer_name}' to map")
 
 
-# QUESTION(lindzey): Should this BE a FigureCanvas, rather than having the main
-#   class access the cansas member in order to embed it into the UI?
-class ScalarDataPlotter(QtCore.QObject):
+class TimeSeriesPlotter(QtCore.QObject):
     cursor_moved = QtCore.pyqtSignal(float)  # new timestamp, in seconds since epoch
 
     def __init__(self):
-        super(ScalarDataPlotter, self).__init__()
+        super(TimeSeriesPlotter, self).__init__()
         ######
         # Handle data stuff
 
@@ -509,6 +506,10 @@ class ScalarDataPlotter(QtCore.QObject):
         self.canvas.draw_idle()
         self.canvas.flush_events()
 
+    @QtCore.pyqtSlot(str, bool)
+    def toggle_visibility(self, key, visible):
+        self.data_axes[key].set_visible(visible)
+
     @QtCore.pyqtSlot(str, float, float)
     def update_data(self, key, tt, val):
         if self.data[key] is None:
@@ -546,13 +547,31 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.iface = iface
         self.lc = lcm.LCM("udpm://239.255.76.67:7667?ttl=0")
 
-        self.map_layer_manager = ScalarDataMapLayerManager(self.iface, self.lc)
+        self.map_layer_plotter = MapLayerPlotter(self.iface, self.lc)
 
-        self.data_selector = ScalarDataFieldWidget(self.iface)
-        self.data_selector.new_field.connect(self.add_field)
+        self.add_field_widget = AddScalarDataFieldWidget(self.iface)
+        self.add_field_widget.new_field.connect(self.add_field)
 
-        self.scalar_plotter = ScalarDataPlotter()
-        self.scalar_plotter.cursor_moved.connect(self.map_layer_manager.update_cursor)
+        self.time_series_plotter = TimeSeriesPlotter()
+        self.time_series_plotter.cursor_moved.connect(
+            self.map_layer_plotter.update_cursor
+        )
+
+        self.configure_time_series_widget = ConfigureTimeSeriesWidget(self.iface)
+        # TODO: actually hook these up to slots!
+        self.configure_time_series_widget.toggle_plot.connect(
+            lambda key, enabled: print(f"Toggling plot {key} to visible={enabled}")
+        )
+        self.configure_time_series_widget.toggle_plot.connect(
+            self.time_series_plotter.toggle_visibility
+        )
+
+        self.configure_time_series_widget.ylim_changed.connect(
+            lambda key, ymin, ymax: print(f"Setting ylim for {key} to {ymin} -> {ymax}")
+        )
+        self.configure_time_series_widget.remove_field.connect(
+            lambda key: print(f"Removing {key}")
+        )
 
         self.config = []  # This gets updated by the add_field method
         try:
@@ -587,7 +606,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         # self.new_data.connect(self.scalar_plotter.update_data)
 
         self.update_timer = QtCore.QTimer()
-        self.update_timer.timeout.connect(self.scalar_plotter.maybe_refresh)
+        self.update_timer.timeout.connect(self.time_series_plotter.maybe_refresh)
         self.update_timer.setSingleShot(False)
         self.update_timer.start(500)  # ms
 
@@ -600,13 +619,15 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         #   chunks of data on the plot
 
         self.vbox = QtWidgets.QVBoxLayout()
-        self.vbox.addWidget(self.data_selector)
+        self.vbox.addWidget(self.add_field_widget)
         self.vbox.addWidget(QHLine())
+        self.vbox.addWidget(QHLine())
+        self.vbox.addWidget(self.configure_time_series_widget)
         self.vbox.addStretch(1.0)
 
         self.hbox = QtWidgets.QHBoxLayout()
         self.hbox.addLayout(self.vbox)
-        self.hbox.addWidget(self.scalar_plotter.canvas, stretch=5)
+        self.hbox.addWidget(self.time_series_plotter.canvas, stretch=5)
 
         self.my_widget = QtWidgets.QWidget()
         self.my_widget.setLayout(self.hbox)
@@ -630,8 +651,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         #   when I finish the refactoring and also pull out the time series plots.
         # TODO: Directly attach these slots to the original signal, after pushing
         #    throttling logic into them?
-        self.map_layer_manager.update_data(key, tt, val)
-        self.scalar_plotter.update_data(key, tt, val)
+        self.map_layer_plotter.update_data(key, tt, val)
+        self.time_series_plotter.update_data(key, tt, val)
 
     def update_subscriptions(self):
         for (
@@ -660,8 +681,9 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.sample_rates[key] = sample_rate
         self.last_updated[key] = 0.0
 
-        self.scalar_plotter.add_field(key, layer_name)
-        self.map_layer_manager.add_field(key, layer_name)
+        self.time_series_plotter.add_field(key, layer_name)
+        self.map_layer_plotter.add_field(key, layer_name)
+        self.configure_time_series_widget.add_field(key, layer_name)
 
         # QUESTION: Can we have multiple subscriptions to the same topic?
         # (e.g. if I want temperature and salinity ...)
@@ -717,8 +739,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
                 # If we've already unsubscribed from DIVE_INI, this will fail.
                 print(ex)
 
-        self.map_layer_manager.closeEvent(event)
-        self.scalar_plotter.closeEvent(event)
+        self.map_layer_plotter.closeEvent(event)
+        self.time_series_plotter.closeEvent(event)
 
         QgsProject.instance().writeEntry(
             "nui_scalar_data", "subscriptions", yaml.safe_dump(self.config)
