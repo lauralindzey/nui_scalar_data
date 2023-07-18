@@ -435,8 +435,11 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         QgsMessageLog.logMessage(
             f"Got map origin: {msg.origin_longitude}, {msg.origin_latitude}; unsubscribing from {channel}"
         )
-        self.lc.unsubscribe(self.subscribers[channel])
-        self.received_origin.emit(msg.origin_longitude, msg.origin_latitude)
+        try:
+            self.lc.unsubscribe(self.subscribers[channel])
+            self.received_origin.emit(msg.origin_longitude, msg.origin_latitude)
+        except Exception as ex:
+            print("Could not unsubscribe from DIVE_INI")
 
     @QtCore.pyqtSlot(str, float, float)
     def update_data(self, key, tt, val):
