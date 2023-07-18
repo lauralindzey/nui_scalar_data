@@ -88,13 +88,275 @@ def mdeglon(lat_deg):
     return dx
 
 
-class ScalarDataMapLayerManager:
+class ScalarDataMapLayerManager(QtCore.QObject):
     """
     Class in charge of managing all QGIS map/layer/etc. interfaces.
+
+    This is the only part of the code that needs to know about map projections,
+    so it also owns the LCM subscription to statexy.
+
+    Interfaces with the rest of the QGIS plugin via:
+    * update_cursor -- should be connected to signal emitted by the time series plot
+    * update_data -- connected to signal emitted when new LCM message with data is received
+    * add_field -- currently directly called by main program's add_field;
+          should probably connect to signal emitted by the ScalarDataField widget.
     """
 
-    def __init__(self):
-        pass
+    # Any LCM handlers need to emit signals rather than directly call functions
+    # that manipulate the QGIS elements, in order to avoid threading issues.
+    received_origin = QtCore.pyqtSignal(float, float)  # lon, lat in degrees
+
+    def __init__(self, iface, lc):
+        super(ScalarDataMapLayerManager, self).__init__()
+        self.iface = iface
+        self.lc = lc
+        # layer_name -> QgsVectorLayer to add features to
+        self.layers = {}
+
+        # Everything NUI does is in the AlvinXY coordinate frame, with origin
+        # as defined in the DIVE_INI message. So, we can't add data to layers
+        # until the first message has been received.
+        self.lat0 = None
+        self.lon0 = None
+        self.projection_initialized = False  # TODO: use 'self.lat0 is None' instead?
+        self.received_origin.connect(self.initialize_origin)
+
+        self.subscribers = {}
+        self.subscribers["DIVE_INI"] = self.lc.subscribe(
+            "DIVE_INI", self.handle_dive_ini
+        )
+
+        self.statexy_lock = threading.Lock()
+        self.statexy_data = None
+        self.subscribers["FIBER_STATEXY"] = self.lc.subscribe(
+            "FIBER_STATEXY", self.handle_statexy
+        )
+        self.subscribers["ACOMM_STATEXY"] = self.lc.subscribe(
+            "ACOMM_STATEXY", self.handle_statexy
+        )
+
+        self.setup_groups()
+        self.setup_cursor_layer()
+
+        self.update_timer = QtCore.QTimer()
+        self.update_timer.timeout.connect(self.maybe_refresh)
+        self.update_timer.setSingleShot(False)
+        self.update_timer.start(500)  # ms
+
+    def setup_groups(self):
+        """
+        Initializes NUI's root group / the scalar data root.
+
+        Re-use the appropriate groups and layers if they exist, in order to
+        let the user save stylings in their QGIS project.
+        """
+        print("setup_groups")
+        # To start with, only add the cursor to the map
+        self.root = QgsProject.instance().layerTreeRoot()
+        print("got root. Is none? ", self.root is None)
+        self.nui_group = self.root.findGroup("NUI")
+        if self.nui_group is None:
+            self.nui_group = self.root.insertGroup(0, "NUI")
+        self.scalar_data_group = self.nui_group.findGroup("Scalar Data")
+        if self.scalar_data_group is None:
+            self.scalar_data_group = self.nui_group.insertGroup(0, "Scalar Data")
+
+    def setup_cursor_layer(self):
+        print("setup_cursor_layer")
+        self.cursor_layer = None
+        for ll in self.scalar_data_group.children():
+            print(ll.name())
+            if (
+                isinstance(ll, qgis.core.QgsLayerTreeLayer)
+                and ll.name() == "Scalar Data Cursor"
+            ):
+                self.cursor_layer = ll.layer()  # ll is a QgsLayerTreeLayer
+        print(
+            "Tried to find cursor_layer in NUI group. Is none?",
+            self.cursor_layer is None,
+        )
+
+        # TODO: Probably also need to check whether it's the right type of layer...
+        if self.cursor_layer is None:
+            self.cursor_layer = QgsVectorLayer(
+                "Point?crs=epsg:4326&field=time:string(30)&index=yes",
+                "Scalar Data Cursor",
+                "memory",
+            )
+            print("...Created cursor_layer")
+            QgsProject.instance().addMapLayer(self.cursor_layer, False)
+            self.scalar_data_group.addLayer(self.cursor_layer)
+
+    @QtCore.pyqtSlot()
+    def maybe_refresh(self):
+        """
+        To avoid updating too frequently, we redraw at a fixed rate.
+
+        In my earlier experiments, I had refresh directly called by the LCM thread,
+        so needed a mutex on the layers.
+        In the Widget, I'm using signals/slots to guarantee that all layer-related
+        stuff happens in a single thread (I hope?)
+
+        I considered adding a flag to see if we need to redraw, but haven't yet.
+        (This will also become more important when we start drawing time series plots.)
+        """
+        # The other problem is updating the bounds of the shading, ratehr than just not plotting points that are off the edges.
+        if self.iface.mapCanvas().isCachingEnabled():
+            # TODO: Should we check per-layer if it needs to be redrawn?
+            #    Maybe only redraw visible layers?
+            for key, layer in self.layers.items():
+                # I'm not sure how this wound up getting called while layer was None.
+                # I thought all things touching the layer were in the same thread,
+                # and that layer creation would finish before this was called.
+                if layer is not None and layer.isValid():
+                    layer.triggerRepaint()
+        else:
+            self.iface.mapCanvas().refresh()
+
+    @QtCore.pyqtSlot(float, float)
+    def initialize_origin(self, lon0, lat0):
+        print(f"initialize_origin. lon={lon0}, lat={lat0}")
+        self.lon0 = lon0
+        self.lat0 = lat0
+        self.crs = QgsCoordinateReferenceSystem()
+        # AlvinXY uses the Clark 1866 ellipsoid; it predates WGS84
+        self.crs.createFromProj4(
+            f"+proj=ortho +lat_0={self.lat0} +lon_0={self.lon0} +ellps=clrk66"
+        )
+        print(f"Created CRS! isValid = {self.crs.isValid()}")
+        self.crs_name = "NuiXY"
+        self.crs.saveAsUserCrs(self.crs_name)
+        # For some reason, setting this custom CRS on a layer doesn't work, but it's fine
+        # for projecting points between.
+        self.map_crs = QgsCoordinateReferenceSystem("epsg:4326")
+        self.tr = QgsCoordinateTransform(self.crs, self.map_crs, QgsProject.instance())
+        self.projection_initialized = True
+
+    @QtCore.pyqtSlot(float)
+    def update_cursor(self, tt):
+        if self.lon0 is None:
+            msg = "Origin not initialized; cannot update cursor"
+            print(msg)
+            return
+
+        with self.statexy_lock:
+            xx = np.interp(tt, self.statexy_data[:, 0], self.statexy_data[:, 1])
+            yy = np.interp(tt, self.statexy_data[:, 0], self.statexy_data[:, 2])
+        lat, lon = xy2ll(xx, yy, self.lat0, self.lon0)
+        pt = qgis.core.QgsPointXY(lon, lat)
+        geom = qgis.core.QgsGeometry.fromPointXY(pt)
+        # I tried to figure out how to just update the existing feature,
+        # but couldn't get its new coords to show in the map.
+        cursor_feature = qgis.core.QgsFeature()
+        cursor_feature.setGeometry(geom)
+        dt = datetime.datetime.utcfromtimestamp(tt)
+        cursor_feature.setAttributes([dt.strftime("%H:%M:%S.%f")])
+        with qgis.core.edit(self.cursor_layer):
+            for feat in self.cursor_layer.getFeatures():
+                self.cursor_layer.deleteFeature(feat.id())
+            self.cursor_layer.dataProvider().addFeature(cursor_feature)
+
+        # If possible, just update this layer. Otherwise, wait for global refresh.
+        if self.iface.mapCanvas().isCachingEnabled():
+            self.cursor_layer.triggerRepaint()
+
+    @QtCore.pyqtSlot(str, float, float)
+    def update_data(self, key, tt, val):
+        if self.lon0 is None:
+            msg = "Origin not initialized; cannot plot data"
+            print(msg)
+            return
+        if key not in self.layers:
+            msg = f"No layer matching {key}; cannot plot data"
+            print(msg)
+            return
+        # Do the interpolation in NuiXY coords, then transform into lat/lon
+        # before adding the feature to the layer.
+        # This is usually OK, but will lead to smearing data when we have nav shifts.
+        with self.statexy_lock:
+            xx = np.interp(tt, self.statexy_data[:, 0], self.statexy_data[:, 1])
+            yy = np.interp(tt, self.statexy_data[:, 0], self.statexy_data[:, 2])
+        feature = qgis.core.QgsFeature()
+        lat, lon = xy2ll(xx, yy, self.lat0, self.lon0)
+        pt = qgis.core.QgsPointXY(lon, lat)
+        geom = qgis.core.QgsGeometry.fromPointXY(pt)
+        # NOTE(lindzey): We could probably go back to this. The issue was using the wrong
+        # EPSG code on the layers themselves, rather than AlvinXY vs something else.
+        # geom.transform(self.tr)
+        feature.setGeometry(geom)
+        dt = datetime.datetime.utcfromtimestamp(tt)
+        feature.setAttributes(
+            [float(xx), float(yy), dt.strftime("%Y-%m-%d %H:%M:%S:%f"), val]
+        )
+        self.layers[key].dataProvider().addFeature(feature)
+
+    def handle_dive_ini(self, channel, data):
+        print("handle_dive_ini")
+        QgsMessageLog.logMessage("handle_dive_ini")
+        msg = dive_t.decode(data)
+        QgsMessageLog.logMessage(
+            f"Got map origin: {msg.origin_longitude}, {msg.origin_latitude}; unsubscribing from {channel}"
+        )
+        try:
+            self.lc.unsubscribe(self.subscribers[channel])
+            self.received_origin.emit(msg.origin_longitude, msg.origin_latitude)
+        except Exception as ex:
+            print("Could not unsubscribe from DIVE_INI")
+
+    def handle_statexy(self, channel, data):
+        """ "
+        This is used for both Fiber and Acomms StateXY messages; only append
+        data to our vector if it's more recent.
+
+        QUESTION: Should we convert northing/easting to lat/lon immediately?
+            (I don't think it matters terribly -- it's always best-estimate, and I
+            don't think we'd ever want to correct for offsets.)
+        """
+        msg = statexy_t.decode(data)
+
+        with self.statexy_lock:
+            if self.statexy_data is None:
+                self.statexy_data = np.array([[msg.utime / 1.0e6, msg.x, msg.y]])
+            else:
+                new_t = msg.utime / 1.0e6
+                last_t = self.statexy_data[-1][0]
+                if new_t > last_t:
+                    self.statexy_data = np.append(
+                        self.statexy_data,
+                        [[msg.utime / 1.0e6, msg.x, msg.y]],
+                        axis=0,
+                    )
+                else:
+                    QgsMessageLog.logMessage(f"Received stale msg: {channel}")
+
+    # QUESTION: should this be a slot too?
+    def add_field(self, key, layer_name):
+        self.layers[key] = None
+
+        print("Searching scalar data group's children...")
+        for ll in self.scalar_data_group.children():
+            print(ll.name())
+            if isinstance(ll, qgis.core.QgsLayerTreeLayer) and ll.name() == layer_name:
+                print(f"Found existing layer for {layer_name}")
+                self.layers[key] = ll.layer()
+                # I'm not sure whether we want to delete features or not ...
+                # For now, don't, in order to support restarting the plugin during a dive.
+                print("... deleting existing features.")
+                with qgis.core.edit(self.layers[key]):
+                    for feat in self.layers[key].getFeatures():
+                        # self.layers[key].deleteFeature(feat.id())
+                        pass
+        if self.layers[key] is None:
+            print("...creating layer.")
+            # TODO: Also need to double-check that it's the right type of layer
+            self.layers[key] = QgsVectorLayer(
+                "Point?crs=epsg:4326&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
+                layer_name,
+                "memory",
+            )
+            QgsProject.instance().addMapLayer(self.layers[key], False)
+            self.scalar_data_group.addLayer(self.layers[key])
+        print(f"Added layer '{layer_name}' to map")
 
 
 class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
@@ -104,12 +366,13 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
     # the main Widget thread.
 
     # Otherwise, trying to add features to the layer will give a warning since parent object is in another thread.
-    received_origin = QtCore.pyqtSignal(float, float)  # lon, lat in degrees
     new_data = QtCore.pyqtSignal(str, float, float)  # layer key, timestamp, value
 
     def __init__(self, iface, parent=None):
         super(NuiScalarDataMainWindow, self).__init__(parent)
         self.iface = iface
+        self.lc = lcm.LCM("udpm://239.255.76.67:7667?ttl=0")
+        self.map_layer_manager = ScalarDataMapLayerManager(self.iface, self.lc)
 
         self.config = []  # This gets updated by the add_field method
         try:
@@ -132,8 +395,6 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
         ####
         # Moving stuff from the original QObject
-        # layer_name -> QgsVectorLayer to add features to
-        self.layers = {}
         # layer_name -> np.array where 1st column is time and 2nd is data
         self.data = {}
         # layer_name -> sample rate
@@ -148,28 +409,14 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         # on top of each other, and by default, each axis gets its own cycler.
         self.color_cycler = plt.rcParams["axes.prop_cycle"]()
 
-        # Everything NUI does is in the AlvinXY coordinate frame, with origin
-        # as defined in the DIVE_INI message. So, we can't set up layers until
-        # the first message has been received.
-        self.projection_initialized = False
-        self.lc = lcm.LCM("udpm://239.255.76.67:7667?ttl=0")
         self.subscribers = {}
-        self.subscribers["DIVE_INI"] = self.lc.subscribe(
-            "DIVE_INI", self.handle_dive_ini
-        )
         self.data_locks = {}
-        self.data_locks["STATEXY"] = threading.Lock()
         self.data = {}
-        self.data["STATEXY"] = None
-        self.subscribers["FIBER_STATEXY"] = self.lc.subscribe(
-            "FIBER_STATEXY", self.handle_statexy
-        )
-        self.subscribers["ACOMM_STATEXY"] = self.lc.subscribe(
-            "ACOMM_STATEXY", self.handle_statexy
-        )
 
-        self.received_origin.connect(self.initialize_origin)
         self.new_data.connect(self.update_data)
+        # For now, the parent class is handling throttling. Might make sense
+        # to push that down into the child classes when I finish refactoring.
+        # self.new_data.connect(self.map_layer_manager.update_data)
 
         self.update_timer = QtCore.QTimer()
         self.update_timer.timeout.connect(self.maybe_refresh)
@@ -177,6 +424,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.update_timer.start(500)  # ms
 
         self.shutdown = False
+
+        self.update_subscriptions()  # Activate any subscriptions from the config
 
     def setup_ui(self):
         self.data_selector = ScalarDataFieldWidget(self.iface)
@@ -230,6 +479,9 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         """
         When the user drags the mouse across the plot, want to update the
         cursor on the map as well.
+
+        # TODO: This should be a click and not a drag -- if the user wants it to stay
+        #   put, that's hard to do while dragging.
         """
         if event.inaxes is None:
             # QgsMessageLog.logMessage(
@@ -247,23 +499,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
         tt = data_xx
         self.cursor_vline.set_xdata(tt)
+        self.map_layer_manager.update_cursor(tt)
 
-        with self.data_locks["STATEXY"]:
-            xx = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 1])
-            yy = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 2])
-        lat, lon = xy2ll(xx, yy, self.lat0, self.lon0)
-        # print(f"Trying to set cursor at x,y = {xx}, {yy} / lon,lat = {lon}, {lat}")
-        pt = qgis.core.QgsPointXY(lon, lat)
-        geom = qgis.core.QgsGeometry.fromPointXY(pt)
-        # I tried to figure out how to just update the existing feature, but couldn't get its new coords to show in the map.
-        cursor_feature = qgis.core.QgsFeature()
-        cursor_feature.setGeometry(geom)
-        dt = datetime.datetime.utcfromtimestamp(tt)
-        cursor_feature.setAttributes([dt.strftime("%H:%M:%S.%f")])
-        with qgis.core.edit(self.cursor_layer):
-            for feat in self.cursor_layer.getFeatures():
-                self.cursor_layer.deleteFeature(feat.id())
-            self.cursor_layer.dataProvider().addFeature(cursor_feature)
         # Don't wait for the 2Hz update; user will expect something more responsive.
         self.maybe_refresh()
 
@@ -272,59 +509,12 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         # TODO: Add cursor
         # TODO: Add second axis, with twinx?
 
-    def handle_statexy(self, channel, data):
-        """ "
-        This is used for both Fiber and Acomms StateXY messages; only append
-        data to our vector if it's more recent.
-
-        QUESTION: Should we convert northing/easting to lat/lon immediately?
-            (I don't think it matters terribly -- it's always best-estimate, and I
-            don't think we'd ever want to correct for offsets.)
-        """
-        msg = statexy_t.decode(data)
-
-        with self.data_locks["STATEXY"]:
-            if self.data["STATEXY"] is None:
-                self.data["STATEXY"] = np.array([[msg.utime / 1.0e6, msg.x, msg.y]])
-            else:
-                new_t = msg.utime / 1.0e6
-                last_t = self.data["STATEXY"][-1][0]
-                if new_t > last_t:
-                    self.data["STATEXY"] = np.append(
-                        self.data["STATEXY"],
-                        [[msg.utime / 1.0e6, msg.x, msg.y]],
-                        axis=0,
-                    )
-                else:
-                    QgsMessageLog.logMessage(f"Received stale msg: {channel}")
-
-    def handle_dive_ini(self, channel, data):
-        print("handle_dive_ini")
-        QgsMessageLog.logMessage("handle_dive_ini")
-        msg = dive_t.decode(data)
-        QgsMessageLog.logMessage(
-            f"Got map origin: {msg.origin_longitude}, {msg.origin_latitude}; unsubscribing from {channel}"
-        )
-        try:
-            self.lc.unsubscribe(self.subscribers[channel])
-            self.received_origin.emit(msg.origin_longitude, msg.origin_latitude)
-        except Exception as ex:
-            print("Could not unsubscribe from DIVE_INI")
-
     @QtCore.pyqtSlot(str, float, float)
     def update_data(self, key, tt, val):
-        """
-        I'm not sure if I'm going to have issues with interpolation + stateXY.
-        Will probably be more important as we start working acoustically; with statexy
-        on a fiber, I'd feel pretty good about just using the most recent position
-        if interpolation isn't an option.
-
-        With longer delays, might wind up wanting to hold on to scalar data and only
-        plot it after we have updated positions...but for now, adding it to layers as it comes in.
-        """
+        """ """
         # Decimate the features that we actually show, since QGIS is displeased by
         # layers with tens or hundreds of thousands of features.
-        # QUESTION: better way to get this? it's somewhere in the layer ...
+        # QUESTION: better way to get this timestamp? it's somewhere in the layer ...
         dt = tt - self.last_updated[key]
         period = 1.0 / self.sample_rates[key]
         if dt < period:
@@ -336,24 +526,6 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         else:
             self.data[key] = np.append(self.data[key], np.array([[tt, val]]), axis=0)
 
-        # Do the interpolation in NuiXY coords, then transform into lat/lon before adding the feature to the layer.
-        with self.data_locks["STATEXY"]:
-            xx = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 1])
-            yy = np.interp(tt, self.data["STATEXY"][:, 0], self.data["STATEXY"][:, 2])
-        feature = qgis.core.QgsFeature()
-        lat, lon = xy2ll(xx, yy, self.lat0, self.lon0)
-        pt = qgis.core.QgsPointXY(lon, lat)
-        geom = qgis.core.QgsGeometry.fromPointXY(pt)
-        # NOTE(lindzey): We could probably go back to this. The issue was using the wrong
-        # EPSG code on the layers themselves, rather than AlvinXY vs something else.
-        # geom.transform(self.tr)
-        feature.setGeometry(geom)
-        dt = datetime.datetime.utcfromtimestamp(tt)
-        feature.setAttributes(
-            [float(xx), float(yy), dt.strftime("%Y-%m-%d %H:%M:%S:%f"), val]
-        )
-        self.layers[key].dataProvider().addFeature(feature)
-
         if self.plot_length < 0:
             (idxs,) = np.where(self.data[key][:, 0] > 0)
         else:
@@ -361,6 +533,10 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             (idxs,) = np.where(self.data[key][:, 0] > t0)
 
         self.data_plots[key].set_data(self.data[key][idxs, 0], self.data[key][idxs, 1])
+
+        # NOTE(lindzey): I expect this to be replaced by a singal/slot
+        #   when I finish the refactoring and also pull out the time series plots.
+        self.map_layer_manager.update_data(key, tt, val)
 
         # This didn't seem to work
         # self.data_axes[key].relim()
@@ -373,55 +549,11 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
     def maybe_refresh(self):
         """
         To avoid updating too frequently, we redraw at a fixed rate.
-
-        In my earlier experiments, I had refresh directly called by the LCM thread,
-        so needed a mutex on the layers.
-        In the Widget, I'm using signals/slots to guarantee that all layer-related
-        stuff happens in a single thread (I hope?)
-
-        I considered adding a flag to see if we need to redraw, but haven't yet.
-        (This will also become more important when we start drawing time series plots.)
+        This one just updates the scalar data plot.
         """
-        # print(f"{time.time()}: Calling refresh on the canvas!")
-        # TODO: This doesn't actually seem to refresh the layers -- maybe I needed the caching method?
-        # The other problem is updating the bounds of the shading, ratehr than just not plotting points that are off the edges.
-        if self.iface.mapCanvas().isCachingEnabled():
-            # TODO: Should we check per-layer if it needs to be redrawn?
-            #    Maybe only redraw visible layers?
-            for key, layer in self.layers.items():
-                # I'm not sure how this wound up getting called while layer was None.
-                # I thought all things touching the layer were in the same thread,
-                # and that layer creation would finish before this was called.
-                if layer is not None and layer.isValid():
-                    layer.triggerRepaint()
-        else:
-            self.iface.mapCanvas().refresh()
-
         # And, update the scalar data plot!
         self.canvas.draw_idle()
         self.canvas.flush_events()
-
-    @QtCore.pyqtSlot(float, float)
-    def initialize_origin(self, lon0, lat0):
-        print(f"initialize_origin. lon={lon0}, lat={lat0}")
-        self.lon0 = lon0
-        self.lat0 = lat0
-        self.crs = QgsCoordinateReferenceSystem()
-        # AlvinXY uses the Clark 1866 ellipsoid; it predates WGS84
-        self.crs.createFromProj4(
-            f"+proj=ortho +lat_0={self.lat0} +lon_0={self.lon0} +ellps=clrk66"
-        )
-        print(f"Created CRS! isValid = {self.crs.isValid()}")
-        self.crs_name = "NuiXY"
-        self.crs.saveAsUserCrs(self.crs_name)
-        # For some reason, setting this custom CRS on a layer doesn't work, but it's fine
-        # for projecting points between.
-        self.map_crs = QgsCoordinateReferenceSystem("epsg:4326")
-        self.tr = QgsCoordinateTransform(self.crs, self.map_crs, QgsProject.instance())
-        self.projection_initialized = True
-
-        self.setup_layers()
-        self.update_subscriptions()  # Activate any subscriptions from the config
 
     def update_subscriptions(self):
         for (
@@ -433,64 +565,10 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         ) in self.loaded_config:
             self.add_field(channel, msg_type_str, msg_field, sample_rate, layer_name)
 
-    def setup_layers(self):
-        """
-        Needs to be called after we've received the message with origin data.
-        """
-        print("setup_layers")
-        # To start with, only add the cursor to the map
-        self.root = QgsProject.instance().layerTreeRoot()
-        print("got root. Is none? ", self.root is None)
-        self.nui_group = self.root.findGroup("NUI")
-        if self.nui_group is None:
-            self.nui_group = self.root.insertGroup(0, "NUI")
-        self.scalar_data_group = self.nui_group.findGroup("Scalar Data")
-        if self.scalar_data_group is None:
-            self.scalar_data_group = self.nui_group.insertGroup(0, "Scalar Data")
-
-        # TODO: Why isn't this finding the layer?!??
-        self.cursor_layer = None
-        for ll in self.scalar_data_group.children():
-            print(ll.name())
-            if (
-                isinstance(ll, qgis.core.QgsLayerTreeLayer)
-                and ll.name() == "Scalar Data Cursor"
-            ):
-                self.cursor_layer = ll.layer()  # ll is a QgsLayerTreeLayer
-        print(
-            "Tried to find cursor_layer in NUI group. Is none?",
-            self.cursor_layer is None,
-        )
-        # TODO: Probably also need to check whether it's the right type of layer...
-        if self.cursor_layer is None:
-            self.cursor_layer = QgsVectorLayer(
-                f"Point?crs=epsg:4326&field=time:string(30)&index=yes",
-                "Scalar Data Cursor",
-                "memory",
-            )
-            print("...Created cursor_layer")
-            QgsProject.instance().addMapLayer(self.cursor_layer, False)
-            self.scalar_data_group.addLayer(self.cursor_layer)
-        cursor_feature = qgis.core.QgsFeature()
-        pt = qgis.core.QgsPointXY(self.lon0, self.lat0)
-        geom = qgis.core.QgsGeometry.fromPointXY(pt)
-        cursor_feature.setGeometry(geom)
-        cursor_feature.setAttributes(["0"])
-        self.cursor_layer.dataProvider().addFeature(cursor_feature)
-
-        print("done with setup_layers")
-
     def add_field(self, channel, msg_type_str, msg_field, sample_rate, layer_name):
         """
         Subscribe to specified data and plot in both map and profile view.
         """
-        if not self.projection_initialized:
-            errmsg = "Waiting on DIVE_INI; cannot add layers."
-            print(errmsg)
-            self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
-            QgsMessageLog.logMessage(errmsg)
-            return
-
         self.config.append([channel, msg_type_str, msg_field, sample_rate, layer_name])
         # NOTE(lindzey): It might be more idiomatic to save this on close, rather than
         #  at every update?
@@ -500,7 +578,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
         key = f"{channel}/{msg_field}"
         print(f"add_field for key={key}")
-        if key in self.layers:
+        if key in self.data:
             errmsg = f"Duplicate field '{key}'"
             print(errmsg)
             self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
@@ -508,7 +586,6 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             return
 
         self.data[key] = None
-        self.layers[key] = None
         self.sample_rates[key] = sample_rate
         self.last_updated[key] = 0.0
         self.data_axes[key] = self.ax.twinx()
@@ -549,30 +626,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             [], [], ".", markersize=1, color=color, label=layer_name
         )
 
-        print("Searching scalar data group's children...")
-        for ll in self.scalar_data_group.children():
-            print(ll.name())
-            if isinstance(ll, qgis.core.QgsLayerTreeLayer) and ll.name() == layer_name:
-                print(f"Found existing layer for {layer_name}")
-                self.layers[key] = ll.layer()
-                # I'm not sure whether we want to delete features or not ...
-                # For now, don't, in order to support restarting the plugin during a dive.
-                print(f"... deleting existing features.")
-                with qgis.core.edit(self.layers[key]):
-                    for feat in self.layers[key].getFeatures():
-                        # self.layers[key].deleteFeature(feat.id())
-                        pass
-        if self.layers[key] is None:
-            print("...creating layer.")
-            # TODO: Also need to double-check that it's the right type of layer
-            self.layers[key] = QgsVectorLayer(
-                f"Point?crs=epsg:4326&field=x:double&field=y:double&field=time:string(30)&field=value:double&index=yes",
-                layer_name,
-                "memory",
-            )
-            QgsProject.instance().addMapLayer(self.layers[key], False)
-            self.scalar_data_group.addLayer(self.layers[key])
-        print(f"Added layer '{layer_name}' to map")
+        self.map_layer_manager.add_field(key, layer_name)
 
         # QUESTION: Can we have multiple subscriptions to the same topic?
         # (e.g. if I want temperature and salinity ...)
@@ -631,15 +685,9 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         event.accept()
 
 
-# Trying to inherit from QObject for now so I can set up signals/slots
+# Needs to be a QObject to use signals/slots
 class NuiScalarDataPlugin(QtCore.QObject):
     def __init__(self, iface):
-        """
-        Re-use the appropriate layers if they exist, in order to let the user
-        save stylings in their QGIS project.
-        QUESTION(lindzey): Does subclassing the QgsPluginLayer help with this?
-        """
-        print("__init__")
         super(NuiScalarDataPlugin, self).__init__()
         self.iface = iface
 
