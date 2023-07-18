@@ -201,7 +201,9 @@ class ScalarDataMapLayerManager(QtCore.QObject):
     @QtCore.pyqtSlot()
     def maybe_refresh(self):
         """
-        To avoid updating too frequently, we redraw at a fixed rate.
+        To avoid updating too frequently, we redraw data layers at a fixed rate.
+        The cursor is handled separately, as part of its own callback, in an
+        attempt to reduce latency experienced by the user.
 
         In my earlier experiments, I had refresh directly called by the LCM thread,
         so needed a mutex on the layers.
@@ -416,13 +418,12 @@ class ScalarDataPlotter(QtCore.QObject):
 
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setFocusPolicy(QtCore.Qt.NoFocus)
-        # TODO: motion notify event is annoying; change to a mouse click?
-        self.canvas.mpl_connect("motion_notify_event", self.on_motion_notify_event)
+        self.canvas.mpl_connect("button_press_event", self.on_button_press_event)
 
     def closeEvent(self, event):
         pass
 
-    def on_motion_notify_event(self, event):
+    def on_button_press_event(self, event):
         """
         When the user drags the mouse across the plot, want to update the
         cursor on the map as well.
