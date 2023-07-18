@@ -179,11 +179,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.update_timer = QtCore.QTimer()
         self.update_timer.timeout.connect(self.maybe_refresh)
         self.update_timer.setSingleShot(False)
-        # QUESTION: Why doesn't this fire at a constant rate?!??
         self.update_timer.start(500)  # ms
 
-        # TODO: consider shutting down plugin when the dockwidget is closed. Right now,
-        #  the LCM callbacks just keep on being called.
         self.shutdown = False
 
     def setup_ui(self):
@@ -394,6 +391,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.config.append(
             [channel_name, msg_type_str, msg_field, sample_rate, layer_name]
         )
+        # NOTE(lindzey): It might be more idiomatic to save this on close, rather than
+        #  at every update?
         print(f"Trying to save config. type = {type(self.config)}: {self.config}")
         config_str = yaml.safe_dump(self.config)
         print(f"Resulting yaml string: {config_str}")
@@ -782,6 +781,8 @@ class NuiScalarDataPlugin(QtCore.QObject):
         # However, it's possible to wrap the MainWindow in a DockWidget...
         mw = NuiScalarDataMainWindow(self.iface)
         self.dw = QtWidgets.QDockWidget("NUI Scalar Data")
+        # Need to unsubscribe from LCM callbacks when the dock widget is closed.
+        self.dw.closeEvent = lambda event: mw.closeEvent(event)
         self.dw.setWidget(mw)
         self.iface.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.dw)
         mw.run()
