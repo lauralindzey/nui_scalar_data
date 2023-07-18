@@ -664,6 +664,13 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             if isinstance(ll, qgis.core.QgsLayerTreeLayer) and ll.name() == layer_name:
                 print(f"Found existing layer for {layer_name}")
                 self.layers[key] = ll.layer()
+                # I'm not sure whether we want to delete features or not ...
+                # For now, don't, in order to support restarting the plugin during a dive.
+                print(f"... deleting existing features.")
+                with qgis.core.edit(self.layers[key]):
+                    for feat in self.layers[key].getFeatures():
+                        # self.layers[key].deleteFeature(feat.id())
+                        pass
         if self.layers[key] is None:
             print("...creating layer.")
             # TODO: Also need to double-check that it's the right type of layer
