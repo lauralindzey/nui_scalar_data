@@ -5,6 +5,7 @@ import sys
 import threading
 
 from matplotlib.figure import Figure
+from matplotlib.backend_bases import MouseButton
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter, ScalarFormatter
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -380,11 +381,21 @@ class TimeSeriesPlotter(QtCore.QObject):
         self.data_axes = {}
         self.data_plots = {}
         self.ylims = {}
+
+        # We have two ways of selecting the time range:
+        # 1) click-and-drag across desired range
+        # 2) text entry of either moving window or starting time
+        # Whichever has been more recently set will take precedence
+
+        # Used for selecting a range of times with mouse
+        self.right_click_t0 = None
+        self.right_click_t1 = None
         # Grossly overloaded value, in seconds
         # * If None, plot all available data
         # * if negative, plot that many seconds
         # * if positive, plot all data sense that timestamp
         self.time_limit = None
+
         # We need our own instance of a color cycler because I'm using multiple axes
         # on top of each other, and by default, each axis gets its own cycler.
         self.color_cycler = plt.rcParams["axes.prop_cycle"]()
@@ -418,9 +429,20 @@ class TimeSeriesPlotter(QtCore.QObject):
         self.canvas = FigureCanvas(self.fig)
         self.canvas.setFocusPolicy(QtCore.Qt.NoFocus)
         self.canvas.mpl_connect("button_press_event", self.on_button_press_event)
+        self.canvas.mpl_connect("button_release_event", self.on_button_release_event)
 
     def closeEvent(self, event):
         pass
+
+    def on_button_release_event(self, event):
+        if event.inaxes is None:
+            return
+
+        data_xx, data_yy = self.ax.transData.inverted().transform((event.x, event.y))
+        if event.button == MouseButton.RIGHT and self.right_click_t0 is not None:
+            self.right_click_t1 = data_xx
+        else:
+            print(f"Got unhandled button release event: {event}")
 
     def on_button_press_event(self, event):
         """
@@ -431,30 +453,21 @@ class TimeSeriesPlotter(QtCore.QObject):
         #   put, that's hard to do while dragging.
         """
         if event.inaxes is None:
-            # QgsMessageLog.logMessage(
-            #     f"got motion that's not in the figure axes. axes = {event.inaxes}"
-            # )
             return
         else:
-            # QgsMessageLog.logMessage(
-            #     f"got motion in axis {event.inaxes}! mouse at {event.x}, {event.y}"
-            #  )
             data_xx, data_yy = self.ax.transData.inverted().transform(
                 (event.x, event.y)
             )
-            # QgsMessageLog.logMessage(f"Which is at data coords {data_xx}, {data_yy}.")
 
-        tt = data_xx
-        self.cursor_vline.set_xdata(tt)
-        self.cursor_moved.emit(tt)
-
-        # Don't wait for the 2Hz update; user will expect something more responsive.
-        self.maybe_refresh()
-
-        # TODO: Add checkbox controlling whether the cursor is active
-        # TODO: Add layer on map with cursor
-        # TODO: Add cursor
-        # TODO: Add second axis, with twinx?
+        if event.button == MouseButton.LEFT:
+            tt = data_xx
+            self.cursor_vline.set_xdata(tt)
+            self.cursor_moved.emit(tt)
+            # Don't wait for the 2Hz update; user will expect something more responsive.
+            self.maybe_refresh()
+        elif event.button == MouseButton.RIGHT:
+            # TODO: Store the time for setting left/right time
+            self.right_click_t0 = data_xx
 
     def add_field(self, key, layer_name):
         self.data[key] = None
@@ -517,27 +530,30 @@ class TimeSeriesPlotter(QtCore.QObject):
         # This somewhat duplicates the logic in update_data (which needs to figure
         # out which points are in the time bounds in order to not plot unnecessarily
         # large numbers of points), but here we look at all datasets.
-        tmin = np.inf
-        tmax = -np.inf
-        for key, data in self.data.items():
-            if data is None:
-                continue
-            tmin = min(tmin, np.min(data[:, 0]))
-            tmax = max(tmax, np.max(data[:, 0]))
-
-        if self.time_limit is None:
-            t0 = tmin
-        elif self.time_limit < 0:
-            t0 = tmax + self.time_limit
+        if self.right_click_t0 is not None and self.right_click_t1 is not None:
+            t0 = self.right_click_t0
+            t1 = self.right_click_t1
         else:
-            t0 = self.time_limit
+            tmin = np.inf
+            tmax = -np.inf
+            for key, data in self.data.items():
+                if data is None:
+                    continue
+                tmin = min(tmin, np.min(data[:, 0]))
+                tmax = max(tmax, np.max(data[:, 0]))
+
+            if self.time_limit is None:
+                t0 = tmin
+            elif self.time_limit < 0:
+                t0 = tmax + self.time_limit
+            else:
+                t0 = self.time_limit
+            t1 = tmax
 
         # If we don't have data yet, will be nan, which isn't valid. EAFP.
         try:
-            self.ax.set_xlim([t0, tmax])
+            self.ax.set_xlim([t0, t1])
         except Exception as ex:
-            # print(f"Couldn't set axis limits to {t0} -> {tmax}")
-            # print(ex)
             pass
 
         self.canvas.draw_idle()
@@ -554,6 +570,9 @@ class TimeSeriesPlotter(QtCore.QObject):
     @QtCore.pyqtSlot(object)
     def set_time_limits(self, timestamp):
         self.time_limit = timestamp
+        # If the lineedit is used to set time window, clear values from mouse
+        self.right_click_t0 = None
+        self.right_click_t1 = None
 
     @QtCore.pyqtSlot(str, float, float)
     def update_data(self, key, tt, val):
@@ -562,14 +581,21 @@ class TimeSeriesPlotter(QtCore.QObject):
         else:
             self.data[key] = np.append(self.data[key], np.array([[tt, val]]), axis=0)
 
-        if self.time_limit is None:
-            t0 = np.min(self.data[key][:, 0])
-        elif self.time_limit < 0:
-            t0 = np.max(self.data[key][:, 0]) + self.time_limit
+        if self.right_click_t0 is not None and self.right_click_t1 is not None:
+            t0 = self.right_click_t0
+            t1 = self.right_click_t1
         else:
-            t0 = self.time_limit
+            if self.time_limit is None:
+                t0 = np.min(self.data[key][:, 0])
+            elif self.time_limit < 0:
+                t0 = np.max(self.data[key][:, 0]) + self.time_limit
+            else:
+                t0 = self.time_limit
+            t1 = np.max(self.data[key][:, 0])
 
-        (idxs,) = np.where(self.data[key][:, 0] >= t0)
+        (gt_idxs,) = np.where(self.data[key][:, 0] >= t0)
+        (lt_idxs,) = np.where(self.data[key][:, 0] <= t1)
+        idxs = np.intersect1d(gt_idxs, lt_idxs)
 
         self.data_plots[key].set_data(self.data[key][idxs, 0], self.data[key][idxs, 1])
 
@@ -578,10 +604,9 @@ class TimeSeriesPlotter(QtCore.QObject):
 
         # Calculate axis limits based on _visible_ data points, not full history.
         ymin, ymax = self.ylims[key]
-        if ymin is None and len(self.data[key] > 0):
+        if ymin is None and len(idxs > 0):
             ymin = np.min(self.data[key][idxs, 1])
-        if ymax is None and len(self.data[key] > 0):
+        if ymax is None and len(idxs > 0):
             ymax = np.max(self.data[key][idxs, 1])
 
-        # print(f"For {key}, setting ylim to {ymin} -> {ymax}")
         self.data_axes[key].set_ylim([ymin, ymax])
