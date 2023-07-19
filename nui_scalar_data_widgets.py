@@ -1,3 +1,4 @@
+import datetime
 import importlib
 import typing
 
@@ -50,6 +51,64 @@ class VerticalLabel(QtWidgets.QLabel):
     def sizeHint(self):
         size = QtWidgets.QLabel.sizeHint(self)
         return QtCore.QSize(size.height(), size.width())
+
+
+class ConfigureTimeLimitsWidget(QtWidgets.QWidget):
+    """
+    Add label + textbox allowing the user to specify range of time to display.
+
+    It's assumed that we always want the most recent data; the supported modes are:
+    * all data (leave box blank)
+    * all data since YYYY-MM-DD hh-mm-ss
+    * moving window of last N seconds
+
+    I was torn about  making this part of the ConfigureTimeSeriesWidget,
+    but it doesn't share any functionality, so keeping it separate for now.
+    """
+
+    time_limits_changed = QtCore.pyqtSignal(object)
+
+    def __init__(self, iface, parent=None):
+        super(ConfigureTimeLimitsWidget, self).__init__(parent)
+        self.iface = iface
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.hbox = QtWidgets.QHBoxLayout()
+        self.label = QtWidgets.QLabel("Time Window:")
+        self.lineedit = QtWidgets.QLineEdit()
+        self.lineedit.editingFinished.connect(self.handle_input)
+        self.hbox.addWidget(self.label)
+        self.hbox.addWidget(self.lineedit)
+        self.setLayout(self.hbox)
+
+    @QtCore.pyqtSlot()
+    def handle_input(self):
+        time_str = str(self.lineedit.text())
+
+        timestamp = None
+
+        try:
+            # Emit a negative number to indicate moving window before present time
+            delta = float(time_str)
+            if delta > 0:
+                delta = -1 * delta
+            timestamp = delta
+        except Exception as ex:
+            print(f"Could not convert {time_str} to float; trying datetime")
+
+        try:
+            # Force times to be in UTC by appending +0 and reading in %z
+            fmt = "%Y-%m-%d %H:%M:%S%z"
+            print(f"trying dt with format {fmt} and str {time_str}")
+            dt = datetime.datetime.strptime(time_str + "+00:00", fmt)
+            print(f"Setting t0 = {dt.timestamp()}")
+            timestamp = dt.timestamp()
+        except Exception as ex:
+            print(f"Could not convert {time_str} to datetime; defaulting to None")
+
+        # Default case; show full history
+        self.time_limits_changed.emit(timestamp)
 
 
 class ConfigureTimeSeriesWidget(QtWidgets.QWidget):

@@ -232,8 +232,8 @@ class MapLayerPlotter(QtCore.QObject):
     @QtCore.pyqtSlot(float)
     def update_cursor(self, tt):
         if self.lon0 is None:
-            msg = "Origin not initialized; cannot update cursor"
-            print(msg)
+            # msg = "Origin not initialized; cannot update cursor"
+            # print(msg)
             return
 
         with self.statexy_lock:
@@ -377,7 +377,11 @@ class TimeSeriesPlotter(QtCore.QObject):
         self.data_axes = {}
         self.data_plots = {}
         self.ylims = {}
-        self.plot_length = -1  # In seconds; if -1, plot all available data
+        # Grossly overloaded value, in seconds
+        # * If None, plot all available data
+        # * if negative, plot that many seconds
+        # * if positive, plot all data sense that timestamp
+        self.time_limit = None
         # We need our own instance of a color cycler because I'm using multiple axes
         # on top of each other, and by default, each axis gets its own cycler.
         self.color_cycler = plt.rcParams["axes.prop_cycle"]()
@@ -385,7 +389,7 @@ class TimeSeriesPlotter(QtCore.QObject):
         ######
         # Handle GUI stuff
         self.fig = Figure((8.0, 4.0), dpi=100)
-        self.ax = self.fig.add_axes([0.1, 0.15, 0.8, 0.8])
+        self.ax = self.fig.add_axes([0.1, 0.2, 0.8, 0.75])
         self.cursor_vline = self.ax.axvline(0, 0, 1, ls="--", color="grey")
         self.time_formatter = FuncFormatter(
             lambda tt, pos: datetime.datetime.utcfromtimestamp(tt).strftime(
@@ -507,7 +511,32 @@ class TimeSeriesPlotter(QtCore.QObject):
         To avoid updating too frequently, we redraw at a fixed rate.
         This one just updates the scalar data plot.
         """
-        # And, update the scalar data plot!
+        # This somewhat duplicates the logic in update_data (which needs to figure
+        # out which points are in the time bounds in order to not plot unnecessarily
+        # large numbers of points), but here we look at all datasets.
+        tmin = np.inf
+        tmax = -np.inf
+        for key, data in self.data.items():
+            if data is None:
+                continue
+            tmin = min(tmin, np.min(data[:, 0]))
+            tmax = max(tmax, np.max(data[:, 0]))
+
+        if self.time_limit is None:
+            t0 = tmin
+        elif self.time_limit < 0:
+            t0 = tmax + self.time_limit
+        else:
+            t0 = self.time_limit
+
+        # If we don't have data yet, will be nan, which isn't valid. EAFP.
+        try:
+            self.ax.set_xlim([t0, tmax])
+        except Exception as ex:
+            # print(f"Couldn't set axis limits to {t0} -> {tmax}")
+            # print(ex)
+            pass
+
         self.canvas.draw_idle()
         self.canvas.flush_events()
 
@@ -519,6 +548,10 @@ class TimeSeriesPlotter(QtCore.QObject):
     def set_ylim(self, key, ymin, ymax):
         self.ylims[key] = [ymin, ymax]
 
+    @QtCore.pyqtSlot(object)
+    def set_time_limits(self, timestamp):
+        self.time_limit = timestamp
+
     @QtCore.pyqtSlot(str, float, float)
     def update_data(self, key, tt, val):
         if self.data[key] is None:
@@ -526,22 +559,26 @@ class TimeSeriesPlotter(QtCore.QObject):
         else:
             self.data[key] = np.append(self.data[key], np.array([[tt, val]]), axis=0)
 
-        if self.plot_length < 0:
-            (idxs,) = np.where(self.data[key][:, 0] > 0)
+        if self.time_limit is None:
+            t0 = np.min(self.data[key][:, 0])
+        elif self.time_limit < 0:
+            t0 = np.max(self.data[key][:, 0]) + self.time_limit
         else:
-            t0 = np.max(self.data[key][:, 0]) - self.plot_length
-            (idxs,) = np.where(self.data[key][:, 0] > t0)
+            t0 = self.time_limit
+
+        (idxs,) = np.where(self.data[key][:, 0] > t0)
 
         self.data_plots[key].set_data(self.data[key][idxs, 0], self.data[key][idxs, 1])
 
-        xlim = [np.min(self.data[key][idxs, 0]), np.max(self.data[key][idxs, 0])]
-        self.data_axes[key].set_xlim(xlim)
+        # Intentionally do NOT set xlim here -- that needs to be set only once,
+        # on self.ax, or different-length time histories will fight.
 
         # Calculate axis limits based on _visible_ data points, not full history.
         ymin, ymax = self.ylims[key]
-        if ymin is None:
+        if ymin is None and len(self.data[key] > 0):
             ymin = np.min(self.data[key][idxs, 1])
-        if ymax is None:
+        if ymax is None and len(self.data[key] > 0):
             ymax = np.max(self.data[key][idxs, 1])
 
+        # print(f"For {key}, setting ylim to {ymin} -> {ymax}")
         self.data_axes[key].set_ylim([ymin, ymax])

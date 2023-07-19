@@ -62,20 +62,21 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             self.map_layer_plotter.update_cursor
         )
 
-        self.configure_time_series_widget = ConfigureTimeSeriesWidget(self.iface)
-        self.configure_time_series_widget.toggle_plot.connect(
+        self.time_limits_widget = ConfigureTimeLimitsWidget(self.iface)
+        self.time_limits_widget.time_limits_changed.connect(
+            self.time_series_plotter.set_time_limits
+        )
+
+        self.time_series_widget = ConfigureTimeSeriesWidget(self.iface)
+        self.time_series_widget.toggle_plot.connect(
             self.time_series_plotter.toggle_visibility
         )
-
-        self.configure_time_series_widget.ylim_changed.connect(
-            self.time_series_plotter.set_ylim
-        )
-
-        self.configure_time_series_widget.remove_field.connect(self.remove_field)
-        self.configure_time_series_widget.remove_field.connect(
+        self.time_series_widget.ylim_changed.connect(self.time_series_plotter.set_ylim)
+        self.time_series_widget.remove_field.connect(self.remove_field)
+        self.time_series_widget.remove_field.connect(
             self.time_series_plotter.remove_field
         )
-        self.configure_time_series_widget.remove_field.connect(
+        self.time_series_widget.remove_field.connect(
             self.map_layer_plotter.remove_field
         )
 
@@ -128,8 +129,9 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.vbox = QtWidgets.QVBoxLayout()
         self.vbox.addWidget(self.add_field_widget)
         self.vbox.addWidget(QHLine())
+        self.vbox.addWidget(self.time_limits_widget)
         self.vbox.addWidget(QHLine())
-        self.vbox.addWidget(self.configure_time_series_widget)
+        self.vbox.addWidget(self.time_series_widget)
         self.vbox.addStretch(1.0)
 
         self.hbox = QtWidgets.QHBoxLayout()
@@ -194,7 +196,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
         self.time_series_plotter.add_field(key, layer_name)
         self.map_layer_plotter.add_field(key, layer_name)
-        self.configure_time_series_widget.add_field(key, layer_name)
+        self.time_series_widget.add_field(key, layer_name)
 
         # QUESTION: Can we have multiple subscriptions to the same topic?
         # (e.g. if I want temperature and salinity ...)
