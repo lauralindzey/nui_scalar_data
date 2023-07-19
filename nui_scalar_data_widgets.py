@@ -243,7 +243,7 @@ class AddScalarDataFieldWidget(QtWidgets.QWidget):
         Will be validated for existence of type+field
     """
 
-    new_field = QtCore.pyqtSignal(str, str, str, float, str)
+    new_field = QtCore.pyqtSignal(str, str, str, float, str, bool)
 
     def __init__(self, iface, parent=None):
         super(AddScalarDataFieldWidget, self).__init__(parent)
@@ -281,8 +281,14 @@ class AddScalarDataFieldWidget(QtWidgets.QWidget):
         self.layer_name_label = QtWidgets.QLabel("Layer name:")
         self.layer_name_lineedit = QtWidgets.QLineEdit()
         self.grid.addWidget(self.layer_name_label, row, 0)
-
         self.grid.addWidget(self.layer_name_lineedit, row, 1)
+        row += 1
+
+        self.enable_layer_label = QtWidgets.QLabel("Create layer?")
+        self.enable_layer_checkbox = QtWidgets.QCheckBox()
+        self.enable_layer_checkbox.setChecked(True)
+        self.grid.addWidget(self.enable_layer_label, row, 0)
+        self.grid.addWidget(self.enable_layer_checkbox, row, 1)
         row += 1
 
         self.add_field_button = QtWidgets.QPushButton("Add Field")
@@ -355,6 +361,13 @@ class AddScalarDataFieldWidget(QtWidgets.QWidget):
             return
         print(f"layer_name: {layer_name}")
 
+        layer_enabled = self.enable_layer_checkbox.isChecked()
+
         self.new_field.emit(
-            channel_name, msg_type_str, msg_field, sample_rate, layer_name
+            channel_name,
+            msg_type_str,
+            msg_field,
+            sample_rate,
+            layer_name,
+            layer_enabled,
         )

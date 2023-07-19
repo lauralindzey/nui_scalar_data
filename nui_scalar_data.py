@@ -167,8 +167,17 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
 
     def update_subscriptions(self):
         for key, config in self.loaded_config.items():
-            (channel, msg_type_str, msg_field, sample_rate, layer_name) = config
-            self.add_field(channel, msg_type_str, msg_field, sample_rate, layer_name)
+            (
+                channel,
+                msg_type_str,
+                msg_field,
+                sample_rate,
+                layer_name,
+                create_layer,
+            ) = config
+            self.add_field(
+                channel, msg_type_str, msg_field, sample_rate, layer_name, create_layer
+            )
 
     @QtCore.pyqtSlot(str)
     def remove_field(self, key):
@@ -178,8 +187,10 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.lc.unsubscribe(self.subscribers[key])
         self.subscribers.pop(key)
 
-    @QtCore.pyqtSlot(str, str, str, float, str)
-    def add_field(self, channel, msg_type_str, msg_field, sample_rate, layer_name):
+    @QtCore.pyqtSlot(str, str, str, float, str, bool)
+    def add_field(
+        self, channel, msg_type_str, msg_field, sample_rate, layer_name, create_layer
+    ):
         """
         Subscribe to specified data and plot in both map and profile view.
         """
@@ -191,13 +202,21 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
             QgsMessageLog.logMessage(errmsg)
             return
-        self.config[key] = [channel, msg_type_str, msg_field, sample_rate, layer_name]
+        self.config[key] = [
+            channel,
+            msg_type_str,
+            msg_field,
+            sample_rate,
+            layer_name,
+            create_layer,
+        ]
 
         self.sample_rates[key] = sample_rate
         self.last_updated[key] = 0.0
 
         self.time_series_plotter.add_field(key, layer_name)
-        self.map_layer_plotter.add_field(key, layer_name)
+        if create_layer:
+            self.map_layer_plotter.add_field(key, layer_name)
         self.time_series_widget.add_field(key, layer_name)
 
         # QUESTION: Can we have multiple subscriptions to the same topic?

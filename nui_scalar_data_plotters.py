@@ -264,8 +264,8 @@ class MapLayerPlotter(QtCore.QObject):
             print(msg)
             return
         if key not in self.layers:
-            msg = f"No layer matching {key}; cannot plot data"
-            print(msg)
+            # msg = f"No layer matching {key}; cannot plot data"
+            # print(msg)
             return
         # Do the interpolation in NuiXY coords, then transform into lat/lon
         # before adding the feature to the layer.
@@ -333,12 +333,20 @@ class MapLayerPlotter(QtCore.QObject):
     @QtCore.pyqtSlot(str)
     def clear_field(self, key):
         print(f"MapLayerPlotter.clear_field: {key}")
+        if key not in self.layers:
+            msg = f"No layer matching {key}; cannot clear data"
+            print(msg)
+            return
         with qgis.core.edit(self.layers[key]):
             self.layers[key].dataProvider().truncate()
 
     @QtCore.pyqtSlot(str)
     def remove_field(self, key):
         print(f"MapLayerPlotter.remove_field: {key}")
+        if key not in self.layers:
+            msg = f"No layer matching {key}; cannot remove field"
+            print(msg)
+            return
         layer_id = self.layers[key].id()
         self.layers.pop(key)
         QgsProject.instance().removeMapLayers([layer_id])
