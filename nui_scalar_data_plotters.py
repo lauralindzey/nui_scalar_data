@@ -249,8 +249,7 @@ class MapLayerPlotter(QtCore.QObject):
         dt = datetime.datetime.utcfromtimestamp(tt)
         cursor_feature.setAttributes([dt.strftime("%H:%M:%S.%f")])
         with qgis.core.edit(self.cursor_layer):
-            for feat in self.cursor_layer.getFeatures():
-                self.cursor_layer.deleteFeature(feat.id())
+            self.cursor_layer.dataProvider().truncate()
             self.cursor_layer.dataProvider().addFeature(cursor_feature)
 
         # If possible, just update this layer. Otherwise, wait for global refresh.
@@ -331,6 +330,12 @@ class MapLayerPlotter(QtCore.QObject):
                     pass
 
     @QtCore.pyqtSlot(str)
+    def clear_field(self, key):
+        print(f"MapLayerPlotter.clear_field: {key}")
+        with qgis.core.edit(self.layers[key]):
+            self.layers[key].dataProvider().truncate()
+
+    @QtCore.pyqtSlot(str)
     def remove_field(self, key):
         print(f"MapLayerPlotter.remove_field: {key}")
         layer_id = self.layers[key].id()
@@ -347,13 +352,7 @@ class MapLayerPlotter(QtCore.QObject):
             if isinstance(ll, qgis.core.QgsLayerTreeLayer) and ll.name() == layer_name:
                 print(f"Found existing layer for {layer_name}")
                 self.layers[key] = ll.layer()
-                # I'm not sure whether we want to delete features or not ...
-                # For now, don't, in order to support restarting the plugin during a dive.
-                print("... deleting existing features.")
-                with qgis.core.edit(self.layers[key]):
-                    for feat in self.layers[key].getFeatures():
-                        # self.layers[key].deleteFeature(feat.id())
-                        pass
+                # Don't auto-delete existing features; user has button to do so if desired
         if self.layers[key] is None:
             print("...creating layer.")
             # TODO: Also need to double-check that it's the right type of layer

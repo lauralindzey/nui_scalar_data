@@ -80,6 +80,8 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             self.map_layer_plotter.remove_field
         )
 
+        self.time_series_widget.clear_field.connect(self.map_layer_plotter.clear_field)
+
         self.config = {}  # This gets updated by the add_field method
         try:
             config_str, success = QgsProject.instance().readEntry(

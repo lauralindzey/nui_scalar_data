@@ -124,12 +124,15 @@ class ConfigureTimeSeriesWidget(QtWidgets.QWidget):
     ylim_changed = QtCore.pyqtSignal(str, object, object)
     # whether to entirely stop tracking a given field. Removes from map and time series.
     remove_field = QtCore.pyqtSignal(str)
+    # Clear all map points for this field (they persist in the project if we don't...)
+    clear_field = QtCore.pyqtSignal(str)
 
     VISIBLE_COLUMN = 0
     NAME_COLUMN = 1
     MIN_Y_COLUMN = 2
     MAX_Y_COLUMN = 3
     REMOVE_COLUMN = 4
+    CLEAR_COLUMN = 5
 
     def __init__(self, iface, parent=None):
         super(ConfigureTimeSeriesWidget, self).__init__(parent)
@@ -145,6 +148,7 @@ class ConfigureTimeSeriesWidget(QtWidgets.QWidget):
         self.min_y_label = VerticalLabel("Min Y")
         self.max_y_label = VerticalLabel("Max Y")
         self.remove_label = VerticalLabel("Remove")
+        self.clear_label = VerticalLabel("Clear")
 
         # Dict mapping key to buttons and textboxes
         self.widgets = {}
@@ -155,6 +159,7 @@ class ConfigureTimeSeriesWidget(QtWidgets.QWidget):
         self.grid.addWidget(self.min_y_label, row, self.MIN_Y_COLUMN)
         self.grid.addWidget(self.max_y_label, row, self.MAX_Y_COLUMN)
         self.grid.addWidget(self.remove_label, row, self.REMOVE_COLUMN)
+        self.grid.addWidget(self.clear_label, row, self.CLEAR_COLUMN)
 
         self.setLayout(self.grid)
         self.remove_field.connect(self.remove_field_widgets)
@@ -178,6 +183,9 @@ class ConfigureTimeSeriesWidget(QtWidgets.QWidget):
         remove_button.setFixedWidth(25)
         remove_button.setStyleSheet("QPushButton {color: red;}")
         remove_button.pressed.connect(lambda key=key: self.remove_field.emit(key))
+        clear_button = QtWidgets.QPushButton("-")
+        clear_button.setFixedWidth(25)
+        clear_button.pressed.connect(lambda key=key: self.clear_field.emit(key))
 
         self.widgets[key] = (
             visible_checkbox,
@@ -185,6 +193,7 @@ class ConfigureTimeSeriesWidget(QtWidgets.QWidget):
             ymin_lineedit,
             ymax_lineedit,
             remove_button,
+            clear_button,
         )
         row = self.grid.rowCount()
         self.grid.addWidget(visible_checkbox, row, self.VISIBLE_COLUMN)
@@ -192,6 +201,7 @@ class ConfigureTimeSeriesWidget(QtWidgets.QWidget):
         self.grid.addWidget(ymin_lineedit, row, self.MIN_Y_COLUMN)
         self.grid.addWidget(ymax_lineedit, row, self.MAX_Y_COLUMN)
         self.grid.addWidget(remove_button, row, self.REMOVE_COLUMN)
+        self.grid.addWidget(clear_button, row, self.CLEAR_COLUMN)
 
     def on_ylim_changed(self, key):
         # when one box changes, go ahead and send update for both
