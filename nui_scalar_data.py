@@ -395,6 +395,7 @@ class TimeSeriesPlotter(QtCore.QObject):
         # layer_name -> axes object for plotting
         self.data_axes = {}
         self.data_plots = {}
+        self.ylims = {}
         self.plot_length = -1  # In seconds; if -1, plot all available data
         # We need our own instance of a color cycler because I'm using multiple axes
         # on top of each other, and by default, each axis gets its own cycler.
@@ -468,6 +469,7 @@ class TimeSeriesPlotter(QtCore.QObject):
     def add_field(self, key, layer_name):
         self.data[key] = None
         self.data_axes[key] = self.ax.twinx()
+        self.ylims[key] = [None, None]
 
         # Try to split labels across left/right for readability
         if len(self.fig.axes) % 2 == 0:
@@ -512,7 +514,9 @@ class TimeSeriesPlotter(QtCore.QObject):
         print(f"TimeSeriesPlotter.remove_field: {key}")
         self.data_axes[key].remove()
         self.data_axes.pop(key)
+        self.data_plots.pop(key)
         self.data.pop(key)
+        self.ylims.pop(key)
 
     @QtCore.pyqtSlot()
     def maybe_refresh(self):
@@ -527,6 +531,10 @@ class TimeSeriesPlotter(QtCore.QObject):
     @QtCore.pyqtSlot(str, bool)
     def toggle_visibility(self, key, visible):
         self.data_axes[key].set_visible(visible)
+
+    @QtCore.pyqtSlot(str, object, object)
+    def set_ylim(self, key, ymin, ymax):
+        self.ylims[key] = [ymin, ymax]
 
     @QtCore.pyqtSlot(str, float, float)
     def update_data(self, key, tt, val):
@@ -543,12 +551,17 @@ class TimeSeriesPlotter(QtCore.QObject):
 
         self.data_plots[key].set_data(self.data[key][idxs, 0], self.data[key][idxs, 1])
 
-        # This didn't seem to work
-        # self.data_axes[key].relim()
         xlim = [np.min(self.data[key][idxs, 0]), np.max(self.data[key][idxs, 0])]
-        ylim = [np.min(self.data[key][idxs, 1]), np.max(self.data[key][idxs, 1])]
         self.data_axes[key].set_xlim(xlim)
-        self.data_axes[key].set_ylim(ylim)
+
+        # Calculate axis limits based on _visible_ data points, not full history.
+        ymin, ymax = self.ylims[key]
+        if ymin is None:
+            ymin = np.min(self.data[key][idxs, 1])
+        if ymax is None:
+            ymax = np.max(self.data[key][idxs, 1])
+
+        self.data_axes[key].set_ylim([ymin, ymax])
 
 
 class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
@@ -576,21 +589,14 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         )
 
         self.configure_time_series_widget = ConfigureTimeSeriesWidget(self.iface)
-        # TODO: actually hook these up to slots!
-        self.configure_time_series_widget.toggle_plot.connect(
-            lambda key, enabled: print(f"Toggling plot {key} to visible={enabled}")
-        )
         self.configure_time_series_widget.toggle_plot.connect(
             self.time_series_plotter.toggle_visibility
         )
 
         self.configure_time_series_widget.ylim_changed.connect(
-            lambda key, ymin, ymax: print(f"Setting ylim for {key} to {ymin} -> {ymax}")
+            self.time_series_plotter.set_ylim
         )
 
-        self.configure_time_series_widget.remove_field.connect(
-            lambda key: print(f"Removing {key}")
-        )
         self.configure_time_series_widget.remove_field.connect(self.remove_field)
         self.configure_time_series_widget.remove_field.connect(
             self.time_series_plotter.remove_field
@@ -599,7 +605,6 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             self.map_layer_plotter.remove_field
         )
 
-        # TODO: would be nicer to do this as a dict...
         self.config = {}  # This gets updated by the add_field method
         try:
             config_str, success = QgsProject.instance().readEntry(
@@ -619,6 +624,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         #   but this works for now.
         self.msg_modules = {}
 
+        # TODO: We don't actually need this dict; information is available in self.config
         # layer_name -> sample rate
         self.sample_rates = {}
         # layer_name -> timestamp of most recently-added feature (used for decimation)
