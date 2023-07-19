@@ -1,28 +1,38 @@
 # nui_scalar_data
 
-The nui_scalar_data QGIS plugin supports real-tiem viewing of any scalar data published
+The nui_scalar_data QGIS plugin supports real-time viewing of any scalar data published
 by NUI, tying together a time series view and a map view.
 
 No attempt has been made to make this vehicle-agnostic, though only a few modifications would be necessary:
 * It is assumed that all LCM messages have a `utime` field, giving microseconds since the epoch
 * Nui uses a local AlvinXY-style coordinate system. The plugin listens for a DIVE_INI message to determine the origin.
-* Position data is collected from the ACOMMS_STATEXY and FIBER_STATEXY; scalar data is plotted in map view by interpolating into these coordinates.
+* Position data is collected from the ACOMMS_STATEXY and FIBER_STATEXY channels; time-stamped scalar data is plotted in map view by interpolating into these coordinates.
 
-Any top-level scalar field in a LCM message is supported.
-* can't yet handle nested messages
-* can't index into arrays
+Any top-level scalar field in a LCM message is supported. However, support for some fields are not yet implemented:
+* nested messages
+* indexing into arrays
 
 ### Installation instructions
 
-clone; symlink into ?? for mac and ?? for windows
+`git clone git@github.com:lauralindzey/nui_scalar_data.git`
+
+On a Mac, QGIS expects plugins to be installed to
+`~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins`
+
+On Linux, QGIS plugins are installed to
+`~/.local/share/QGIS/QGIS3/profiles/default/python/plugins`
+
+Either clone directly to the plugin directory, or create a symbolic link to your checkout from the appropriate directory. (If you will be developing the plugin, use a symlink -- if you have to uninstall the plugin, QGIS will delete that directory.)
 
 After cloning, restart QGIS, then plugins->"Manage and Install Plugins..."->"Installed Plugins". Make sure "NUI Scalar Data" is checked.
 
-assumes that the NUI LCM definitions and lcm install are on your pythonpath.
+Using this plugin assumes that the NUI LCM definitions and lcm install are on your pythonpath.
+* Follow the install instructions at http://lcm-proj.github.io/lcm/
+* Clone dslmeta: ssh://git@bitbucket.org/whoidsl/dslmeta-git
 
-If you will be doing any development, the "plugin reloader" plugin is very useful.
-I like to run qgis from the command line; then the output of `print` statements is visible. I've used `print` and `logMessage` (goes to python console in qgis) for developer-focused messages, and the messageBar for user-targeted messages.
+If you will be doing any development, the "Plugin Reloader" plugin is very useful: it allows you to reload a plugin whose code has changed without having to restart QGIS.
 Also note that if your changes cause the plugin to not load cleanly, you'll have to restart QGIS; if there are errors on launch, those can be fixed and then the plugin reloaded without a full restart.
+I like to run qgis from the command line; then the output of `print` statements is visible. I've used `print` and `logMessage` (goes to python console in qgis) for developer-focused messages, and the messageBar for user-targeted messages.
 
 Open the plugin by either clicking the NUI icon or Plugins->"Nui Scalar Data"->"Display scalar data from NUI"
 
@@ -49,5 +59,29 @@ We also have some options to configure what's shown in the time-series viewer.
 * The checkboxes toggle visibility, but the data is still there
 * min/max Y allow the user to set y limits to cut off fliers. Leave blank or type 'none' if you want limits to be calculated from data bounds
 * the remove button will entirely remove that data source, both from the layers menu and the time series plot.
+* the clear button will remove all points from the QGIS layer; this is useful because the previous dive's data may be saved in the project file.
 
-TODO: selecting time limits
+The plugin provides two ways of selecting the time range:
+1) right-click-and-drag across desired range
+2) text entry of either moving window or starting time
+Whichever has been more recently set will take precedence.
+
+The text entry is grossly overloaded:
+* Enter a single number, and it will be interpreted as a moving window, and will display the last N seconds of data, as a moving window.
+* Leave the box empty (or enter something that doesn't parse), and the xaxis will cover the full span of data.
+* A timestamp formatted in "YYYY-mm-dd HH:MM:SS" will show all data since that timestamp, making it possible to cut off the descent and then view all data at depth.
+
+Adding persistent markers is currently a little clunky to set up, but :
+* Select the NUI group, then "Layer"->"Create Layer"->"New Shapefile Layer"
+  * choose a filename alongside your other QGIS layers for the project
+  * Select "Geometry Type" -> "Point"
+  * Make sure it's using the EPSG:4326 CRS
+  * Create a new field, with Name="notes", Type="text data", then click "Add to Fields List"
+  * click OK
+* Configure layer to display annotations
+  * right-click on layer in the menu
+  * click "labels", then select "Single Labels", then "OK"
+* With the new layer selected, enable editing by clicking the pencil
+* Select the "Add Point Feature Tool" (icon with three dots, or command+.)
+* Click on area of interest; fill in note in popup, then click OK
+* disable editing by clicking pencil again; save when prompted
