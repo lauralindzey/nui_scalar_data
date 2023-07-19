@@ -143,6 +143,7 @@ class MapLayerPlotter(QtCore.QObject):
         self.update_timer.start(500)  # ms
 
     def closeEvent(self, _event):
+        print("MapLayerPlotter.closeEvent()")
         self.update_timer.stop()
 
         for key, sub in self.subscribers.items():
@@ -221,7 +222,10 @@ class MapLayerPlotter(QtCore.QObject):
                 # I thought all things touching the layer were in the same thread,
                 # and that layer creation would finish before this was called.
                 if layer is not None and layer.isValid():
-                    layer.triggerRepaint()
+                    try:
+                        layer.triggerRepaint()
+                    except Exception as ex:
+                        print(f"Failed to repaint layer {key}")
         else:
             self.iface.mapCanvas().refresh()
 
@@ -340,6 +344,13 @@ class MapLayerPlotter(QtCore.QObject):
                     )
                 else:
                     QgsMessageLog.logMessage(f"Received stale msg: {channel}")
+
+    @QtCore.pyqtSlot(str)
+    def remove_field(self, key):
+        print(f"MapLayerPlotter.remove_field: {key}")
+        layer_id = self.layers[key].id()
+        self.layers.pop(key)
+        QgsProject.instance().removeMapLayers([layer_id])
 
     # QUESTION: should this be a slot too?
     def add_field(self, key, layer_name):
@@ -496,6 +507,13 @@ class TimeSeriesPlotter(QtCore.QObject):
             [], [], ".", markersize=1, color=color, label=layer_name
         )
 
+    @QtCore.pyqtSlot(str)
+    def remove_field(self, key):
+        print(f"TimeSeriesPlotter.remove_field: {key}")
+        self.data_axes[key].remove()
+        self.data_axes.pop(key)
+        self.data.pop(key)
+
     @QtCore.pyqtSlot()
     def maybe_refresh(self):
         """
@@ -569,11 +587,20 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.configure_time_series_widget.ylim_changed.connect(
             lambda key, ymin, ymax: print(f"Setting ylim for {key} to {ymin} -> {ymax}")
         )
+
         self.configure_time_series_widget.remove_field.connect(
             lambda key: print(f"Removing {key}")
         )
+        self.configure_time_series_widget.remove_field.connect(self.remove_field)
+        self.configure_time_series_widget.remove_field.connect(
+            self.time_series_plotter.remove_field
+        )
+        self.configure_time_series_widget.remove_field.connect(
+            self.map_layer_plotter.remove_field
+        )
 
-        self.config = []  # This gets updated by the add_field method
+        # TODO: would be nicer to do this as a dict...
+        self.config = {}  # This gets updated by the add_field method
         try:
             config_str, success = QgsProject.instance().readEntry(
                 "nui_scalar_data", "subscriptions"
@@ -582,9 +609,9 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
                 self.loaded_config = yaml.safe_load(config_str)
                 print(f"Loaded config! {self.loaded_config}")
             else:
-                self.loaded_config = []
+                self.loaded_config = {}
         except Exception as ex:
-            self.loaded_config = []
+            self.loaded_config = {}
 
         self.setup_ui()
 
@@ -655,28 +682,32 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.time_series_plotter.update_data(key, tt, val)
 
     def update_subscriptions(self):
-        for (
-            channel,
-            msg_type_str,
-            msg_field,
-            sample_rate,
-            layer_name,
-        ) in self.loaded_config:
+        for key, config in self.loaded_config.items():
+            (channel, msg_type_str, msg_field, sample_rate, layer_name) = config
             self.add_field(channel, msg_type_str, msg_field, sample_rate, layer_name)
 
+    @QtCore.pyqtSlot(str)
+    def remove_field(self, key):
+        self.sample_rates.pop(key)
+        self.last_updated.pop(key)
+        self.config.pop(key)
+        self.lc.unsubscribe(self.subscribers[key])
+        self.subscribers.pop(key)
+
+    @QtCore.pyqtSlot(str, str, str, float, str)
     def add_field(self, channel, msg_type_str, msg_field, sample_rate, layer_name):
         """
         Subscribe to specified data and plot in both map and profile view.
         """
         key = f"{channel}/{msg_field}"
         print(f"add_field for key={key}")
-        if key in self.sample_rates:
+        if key in self.config:
             errmsg = f"Duplicate field '{key}'"
             print(errmsg)
             self.iface.messageBar().pushMessage(errmsg, level=Qgis.Warning)
             QgsMessageLog.logMessage(errmsg)
             return
-        self.config.append([channel, msg_type_str, msg_field, sample_rate, layer_name])
+        self.config[key] = [channel, msg_type_str, msg_field, sample_rate, layer_name]
 
         self.sample_rates[key] = sample_rate
         self.last_updated[key] = 0.0
@@ -736,12 +767,12 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             try:
                 self.lc.unsubscribe(sub)
             except Exception as ex:
-                # If we've already unsubscribed from DIVE_INI, this will fail.
                 print(ex)
 
         self.map_layer_plotter.closeEvent(event)
         self.time_series_plotter.closeEvent(event)
 
+        print(f"Saving updated config! {yaml.safe_dump(self.config)}")
         QgsProject.instance().writeEntry(
             "nui_scalar_data", "subscriptions", yaml.safe_dump(self.config)
         )

@@ -152,7 +152,7 @@ class ConfigureTimeSeriesWidget(QtWidgets.QWidget):
 
     @QtCore.pyqtSlot(str)
     def remove_field_widgets(self, key):
-        print(f"Removing widgets for {key}")
+        print(f"ConfigureTimeSeriesWidget.remove_field_widgets: {key}")
         if key not in self.widgets or self.widgets[key] is None:
             err = f"Cannot remove widgets for key {key} -- not in dict!"
             print(err)
