@@ -217,7 +217,7 @@ class MapLayerPlotter(QtCore.QObject):
         self.lat0 = lat0
         self.crs = QgsCoordinateReferenceSystem()
         # AlvinXY uses the Clark 1866 ellipsoid; it predates WGS84
-        self.crs.createFromProj4(
+        self.crs.createFromProj(
             f"+proj=ortho +lat_0={self.lat0} +lon_0={self.lon0} +ellps=clrk66"
         )
         print(f"Created CRS! isValid = {self.crs.isValid()}")
@@ -324,7 +324,11 @@ class MapLayerPlotter(QtCore.QObject):
                         axis=0,
                     )
                 else:
-                    QgsMessageLog.logMessage(f"Received stale msg: {channel}")
+                    # Ignore stale data. Will occasionally get out-of-order
+                    # FIBER_STATEXY messages, but the real intent here it to not have
+                    # ACOMMS_STATEXY overwrite newer FIBER_STATEXY ones.
+                    # QgsMessageLog.logMessage(f"Received stale msg: {channel}")
+                    pass
 
     @QtCore.pyqtSlot(str)
     def remove_field(self, key):
@@ -566,7 +570,7 @@ class TimeSeriesPlotter(QtCore.QObject):
         else:
             t0 = self.time_limit
 
-        (idxs,) = np.where(self.data[key][:, 0] > t0)
+        (idxs,) = np.where(self.data[key][:, 0] >= t0)
 
         self.data_plots[key].set_data(self.data[key][idxs, 0], self.data[key][idxs, 1])
 
