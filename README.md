@@ -42,6 +42,7 @@ Start QGIS with "dsl-qgis"
 If you will be doing any development, the "Plugin Reloader" plugin is very useful: it allows you to reload a plugin whose code has changed without having to restart QGIS.
 * Plugins -> manage and Install Plugins...
 * Click "All", search for "Plugin Reloader", select and click "Install"
+
 Also note that if your changes cause the plugin to not load cleanly, you'll have to restart QGIS; if there are errors on launch, those can be fixed and then the plugin reloaded without a full restart.
 I like to run qgis from the command line; then the output of `print` statements is visible. I've used `print` and `logMessage` (goes to python console in qgis) for developer-focused messages, and the messageBar for user-targeted messages.
 
@@ -49,14 +50,14 @@ I like to run qgis from the command line; then the output of `print` statements 
 
 `git clone git@github.com:lauralindzey/nui_scalar_data.git`
 
+Then, create a symbolic link to your checkout from the appropriate directory. (If you will be developing the plugin, it's a bad idea to install it directly into the directory  managed by QGIS, because uninstalling it will delete the plugin and any changes.)
+
 On a Mac, QGIS expects plugins to be installed to
 `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins`
 
 On Linux, QGIS plugins are installed to
 `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins`
 (This directory is create the first time you install a plugin via the QGIS menu.)
-
-Either clone directly to the plugin directory, or create a symbolic link to your checkout from the appropriate directory. (If you will be developing the plugin, use a symlink -- if you have to uninstall the plugin, QGIS will delete that directory.)
 
 After cloning and linking, restart QGIS, then install it:
 * plugins->"Manage and Install Plugins..."

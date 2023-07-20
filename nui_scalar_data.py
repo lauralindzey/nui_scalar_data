@@ -184,6 +184,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.sample_rates.pop(key)
         self.last_updated.pop(key)
         self.config.pop(key)
+        self.save_config()
         self.lc.unsubscribe(self.subscribers[key])
         self.subscribers.pop(key)
 
@@ -210,6 +211,7 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
             layer_name,
             create_layer,
         ]
+        self.save_config()
 
         self.sample_rates[key] = sample_rate
         self.last_updated[key] = 0.0
@@ -275,11 +277,14 @@ class NuiScalarDataMainWindow(QtWidgets.QMainWindow):
         self.map_layer_plotter.closeEvent(event)
         self.time_series_plotter.closeEvent(event)
 
+        self.save_config()
+        event.accept()
+
+    def save_config(self):
         print(f"Saving updated config! {yaml.safe_dump(self.config)}")
         QgsProject.instance().writeEntry(
             "nui_scalar_data", "subscriptions", yaml.safe_dump(self.config)
         )
-        event.accept()
 
 
 # Needs to be a QObject to use signals/slots
